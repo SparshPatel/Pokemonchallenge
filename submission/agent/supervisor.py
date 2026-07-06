@@ -72,6 +72,11 @@ def _lethal_options(obs_dict, select: Select, gd: GameData):
     for opt in select.options:
         if opt.type != OptionType.ATTACK:
             continue
+        # Check if the attack is actually affordable (enough Energy to pay).
+        cost = gd.attack_cost(opt.attack_id)
+        energies = my_active.get("energies") or [] if isinstance(my_active, dict) else []
+        if not gd.can_pay(cost, energies):
+            continue  # Skip attacks we can't afford
         dmg = gd.attack_damage(opt.attack_id)
         if opt.attack_id == _MAD_BITE_ID:
             counters = max(0, int((opp_maxhp - opp_hp) / 10)) if opp_maxhp else 0
