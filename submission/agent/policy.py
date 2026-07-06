@@ -18,9 +18,11 @@ from __future__ import annotations
 import os
 import time
 
-from . import rules
+from . import rules, supervisor
 from .adapter import Select
+from .archetype import ArchetypeDetector
 from .cards import CardStats
+from .enums import SelectType
 from .gamedata import GameData
 
 
@@ -32,12 +34,37 @@ class Policy:
         time_budget_s: float = 8.0,
         enable_pimc: bool | None = None,
         enable_planner: bool | None = None,
-        planner_think_s: float = 0.6,
+        planner_think_s: float = 0.12,
+        enable_supervisor: bool | None = None,
+        enable_archetype: bool | None = None,
     ):
         self.cards = CardStats.load(card_stats_path)
         self.gamedata = GameData.load()
         self.deck_ids = list(deck_ids) if deck_ids else []
         self.time_budget_s = time_budget_s
+
+        # Semi-autonomous supervisor: a thin, hardcoded layer above the
+        # autonomous planner/rules stack that forces the handful of decisions
+        # that are correct by the rules of the game (take a game-winning KO;
+        # never end the turn on an un-taken KO). ON by default; the autonomous
+        # stack is otherwise untouched. Disable via PTCG_ENABLE_SUPERVISOR=0.
+        if enable_supervisor is None:
+            enable_supervisor = os.environ.get("PTCG_ENABLE_SUPERVISOR", "1") == "1"
+        self.enable_supervisor = enable_supervisor
+
+        # Opponent-archetype sub-agents: after a few turns, classify the
+        # opponent (wall/pivot vs aggro/plunderer) and shift the rule + planner
+        # weights toward the specialised counter-plan. ON by default; falls back
+        # to the base weights while the read is UNKNOWN. Disable via
+        # PTCG_ENABLE_ARCHETYPE=0.
+        if enable_archetype is None:
+            enable_archetype = os.environ.get("PTCG_ENABLE_ARCHETYPE", "1") == "1"
+        self.enable_archetype = enable_archetype
+        self._detector = ArchetypeDetector(self.gamedata) if enable_archetype else None
+        # Snapshot the tuned base weights so per-turn archetype deltas layer on
+        # top of them without drifting.
+        self._base_rules_weights = dict(rules.WEIGHTS)
+        self._last_archetype = None
         # PIMC is OFF by default. Competition evidence shows naive/imperfect
         # search underperforms a solid rule-based policy (0.21-0.42 vs 0.68), so
         # the shipped agent is pure rules unless PIMC is explicitly enabled and
@@ -52,6 +79,12 @@ class Policy:
         # gauntlet (mirror 0.65 vs rules; +0.20 vs strong piloting a wall deck;
         # 0 errors in 750+ games), so it is ON by default in the competition
         # runtime. Set PTCG_ENABLE_PLANNER=0 to force pure rules.
+        #
+        # Think budget defaults to 0.12s/decision (the value validated in the
+        # write-up). An earlier 0.6s default gave no measurable win-rate gain
+        # (0.775 vs 0.750 over 80 same-deck games vs strong, within noise) but
+        # 5x the worst-case latency -- a real forfeit risk on slower judge
+        # hardware. Override with PTCG_PLANNER_THINK_S.
         if enable_planner is None:
             enable_planner = os.environ.get("PTCG_ENABLE_PLANNER", "1") == "1"
         self.enable_planner = enable_planner
@@ -79,6 +112,9 @@ class Policy:
             )
             if planner.available():
                 self._planner = planner
+                # Snapshot the planner's tuned leaf-eval so archetype deltas
+                # layer on top of it without accumulating.
+                self._base_planner_eval = dict(planner.eval)
         except Exception:
             self._planner = None
         return self._planner
@@ -100,25 +136,76 @@ class Policy:
             self._pimc = None
         return self._pimc
 
+    def _apply_archetype_profile(self) -> None:
+        """Update the opponent read and shift rule + planner weights to match.
+
+        Layered additively on the tuned base weights so an UNKNOWN read (or a
+        disabled detector) reproduces the base agent exactly. Crash-safe: any
+        failure leaves the base weights in place.
+        """
+        if self._detector is None:
+            return
+        try:
+            rules_delta = self._detector.rules_delta()
+            merged = dict(self._base_rules_weights)
+            for k, dv in rules_delta.items():
+                if k in merged:
+                    merged[k] = merged[k] + dv
+            rules.set_weights(merged)
+
+            planner = self._planner
+            if planner is not None and hasattr(self, "_base_planner_eval"):
+                eval_delta = self._detector.eval_delta()
+                new_eval = dict(self._base_planner_eval)
+                for k, dv in eval_delta.items():
+                    if k in new_eval:
+                        new_eval[k] = new_eval[k] + dv
+                planner.eval = new_eval
+            self._last_archetype = self._detector.archetype()
+        except Exception:
+            pass
+
     def choose(self, obs_dict, select: Select) -> list[int]:
         deadline = time.monotonic() + self.time_budget_s
 
+        # 1) Update the opponent-archetype read and re-weight the autonomous
+        #    stack for the specialised counter-plan (no-op while UNKNOWN).
+        if self._detector is not None:
+            self._detector.update(obs_dict)
+
+        # 2) Hardcoded supervisor: force a game-winning KO before any search.
+        if self.enable_supervisor and select.select_type == SelectType.MAIN:
+            forced = supervisor.forced_main(obs_dict, select, self.gamedata)
+            if forced:
+                return forced
+
+        # Planner must be constructed before applying eval deltas.
         planner = self._maybe_planner()
+        self._apply_archetype_profile()
+
+        choice = None
         if planner is not None:
             try:
-                choice = planner.choose(obs_dict, select, deadline)
-                if choice:
-                    return choice
+                c = planner.choose(obs_dict, select, deadline)
+                if c:
+                    choice = c
             except Exception:
                 pass  # fall through to PIMC / heuristic
 
-        searcher = self._maybe_pimc()
-        if searcher is not None:
-            try:
-                choice = searcher.choose(obs_dict, select, deadline)
-                if choice:
-                    return choice
-            except Exception:
-                pass  # fall through to heuristic
+        if choice is None:
+            searcher = self._maybe_pimc()
+            if searcher is not None:
+                try:
+                    c = searcher.choose(obs_dict, select, deadline)
+                    if c:
+                        choice = c
+                except Exception:
+                    pass  # fall through to heuristic
 
-        return rules.choose(obs_dict, select, self.gamedata)
+        if choice is None:
+            choice = rules.choose(obs_dict, select, self.gamedata)
+
+        # 3) Supervisor guard: never end the turn on an un-taken KO.
+        if self.enable_supervisor and select.select_type == SelectType.MAIN:
+            choice = supervisor.guard_main(obs_dict, select, self.gamedata, choice)
+        return choice
