@@ -3,6 +3,6 @@ gd ok=True
 planner available=True
 playing 20 games: planner(A) vs rules(B), mirror deck
 RESULT: A(planner) wins=13 B(rules) wins=7 draws=0 winrate_A=0.650
-planner: calls=612 hits=612 errs=0 avg_think=109.86ms max_think=277.0ms
-wall=70.3s (3.51s/game)
+planner: calls=601 hits=601 errs=0 avg_think=98.95ms max_think=171.0ms
+wall=60.2s (3.01s/game)
 DONE

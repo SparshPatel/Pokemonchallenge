@@ -46,19 +46,18 @@ class Policy:
         # Semi-autonomous supervisor: a thin, hardcoded layer above the
         # autonomous planner/rules stack that forces the handful of decisions
         # that are correct by the rules of the game (take a game-winning KO;
-        # never end the turn on an un-taken KO). ON by default; the autonomous
-        # stack is otherwise untouched. Disable via PTCG_ENABLE_SUPERVISOR=0.
+        # never end the turn on an un-taken KO). OFF by default pending debugging
+        # of recent regression. Enable via PTCG_ENABLE_SUPERVISOR=1.
         if enable_supervisor is None:
-            enable_supervisor = os.environ.get("PTCG_ENABLE_SUPERVISOR", "1") == "1"
+            enable_supervisor = os.environ.get("PTCG_ENABLE_SUPERVISOR", "0") == "1"
         self.enable_supervisor = enable_supervisor
 
         # Opponent-archetype sub-agents: after a few turns, classify the
         # opponent (wall/pivot vs aggro/plunderer) and shift the rule + planner
-        # weights toward the specialised counter-plan. ON by default; falls back
-        # to the base weights while the read is UNKNOWN. Disable via
-        # PTCG_ENABLE_ARCHETYPE=0.
+        # weights toward the specialised counter-plan. OFF by default pending debugging
+        # of recent regression. Enable via PTCG_ENABLE_ARCHETYPE=1.
         if enable_archetype is None:
-            enable_archetype = os.environ.get("PTCG_ENABLE_ARCHETYPE", "1") == "1"
+            enable_archetype = os.environ.get("PTCG_ENABLE_ARCHETYPE", "0") == "1"
         self.enable_archetype = enable_archetype
         self._detector = ArchetypeDetector(self.gamedata) if enable_archetype else None
         # Snapshot the tuned base weights so per-turn archetype deltas layer on
