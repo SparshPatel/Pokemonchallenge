@@ -1,0 +1,13 @@
+start: importing + loading GameData
+GameData loaded ok=True attacks=1556 cards=1267
+game 1/2 started
+  game 1: decisions=128 begin_samples=3 step_samples=48
+game 2/2 started
+  game 2: decisions=67 begin_samples=6 step_samples=96
+=== Timing over 2 games ===
+  rules per-decision    : n=  195  mean=  0.091ms  p50=  0.057  p95=  0.197  max=  1.725
+  decisions/game        : mean=97.5 min=67 max=128
+  search_begin          : n=    6  mean=  1.229ms  p50=  1.164  p95=  2.001  max=  2.001
+  search_step           : n=   96  mean=  1.022ms  p50=  0.575  p95=  2.664  max=  9.848
+  turn_expand(begin+16step): n=    6  mean= 25.691ms  p50= 22.145  p95= 41.570  max= 41.570
+DONE

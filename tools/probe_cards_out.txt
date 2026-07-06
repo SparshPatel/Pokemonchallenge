@@ -1,0 +1,422 @@
+﻿================================================================================
+USER-SUGGESTED POKEMON (Sheet 2)
+================================================================================
+  [   24] Team Rocket's Kangaskhan ex            Pokemon      ex       hp=230  prize=2 retreat=2 weak=F ex=True mega=False
+          -> Comet Punch: 0dmg [CC]  Flip 4 coins. This attack does 30 damage for each heads.
+          -> Wicked Impact: 120dmg [CCC]  If you played a Supporter card that has ôTeam Rocketö in its
+
+  [ 1056] Mega Zygarde ex                        Pokemon      Mega-ex  hp=310  prize=3 retreat=2 weak=G ex=False mega=True
+          -> Gaia Wave: 200dmg [FFF]  During your opponentÆs next turn, this PokΘmon takes 30 less
+          -> Nullifying Zero: 0dmg [FFFFF]  For each of your opponentÆs PokΘmon, flip a coin. If heads, 
+
+  [   44] Bloodmoon Ursaluna ex                  Pokemon      ex       hp=260  prize=2 retreat=3 weak=F ex=True mega=False
+          -> Blood Moon: 240dmg [CCCCC]  During your next turn, this PokΘmon canÆt use attacks.
+
+  [  116] Okidogi                                Pokemon      Basic    hp=130  prize=1 retreat=2 weak=P ex=False mega=False
+          -> Good Punch: 70dmg [FF]  
+
+  [  224] Annihilape                             Pokemon      S2       hp=140  prize=1 retreat=2 weak=P ex=False mega=False
+          -> Tantrum: 130dmg [F]  This PokΘmon is now Confused.
+          -> Destined Fight: 0dmg [FC]  Both Active PokΘmon are Knocked Out.
+          evolves from: Primeape (id=438)
+
+  [  437] Mankey                                 Pokemon      Basic    hp=70   prize=1 retreat=1 weak=P ex=False mega=False
+          -> Wild Kick: 30dmg [F]  Flip a coin. If tails, this attack does nothing.
+
+  [  438] Primeape                               Pokemon      S1       hp=110  prize=1 retreat=2 weak=P ex=False mega=False
+          -> Drag Off: 0dmg [F]  Switch in 1 of your opponentÆs Benched PokΘmon to the Active
+          evolves from: Mankey (id=437)
+
+  [  678] Mega Lucario ex                        Pokemon      Mega-ex  hp=340  prize=3 retreat=2 weak=P ex=False mega=True
+          -> Aura Jab: 130dmg [F]  Attach up to 3 Basic {F} Energy cards from your discard pile
+          -> Mega Brave: 270dmg [FF]  During your next turn, this PokΘmon canÆt use Mega Brave.
+          evolves from: Riolu (id=333)
+
+  [  974] Riolu                                  Pokemon      Basic    hp=70   prize=1 retreat=1 weak=P ex=False mega=False
+          -> Punch: 30dmg [FC]  
+
+  [  232] Slaking ex                             Pokemon      ex       hp=340  prize=2 retreat=4 weak=F ex=True mega=False
+          -> Great Swing: 280dmg [CC]  Discard an Energy from this PokΘmon.
+          evolves from: Vigoroth (id=999)
+
+  [  998] Slakoth                                Pokemon      Basic    hp=60   prize=1 retreat=2 weak=F ex=False mega=False
+          -> Take It Easy: 0dmg [C]  Heal 60 damage from this PokΘmon. During your next turn, thi
+
+  [  999] Vigoroth                               Pokemon      S1       hp=90   prize=1 retreat=2 weak=F ex=False mega=False
+          -> Slashing Claw: 50dmg [CC]  
+          evolves from: Slakoth (id=998)
+
+  [  251] Regigigas                              Pokemon      Basic    hp=160  prize=1 retreat=4 weak=F ex=False mega=False
+          -> Jewel Breaker: 100dmg [CCCC]  If your opponentÆs Active PokΘmon is a Tera PokΘmon, this at
+
+  [  337] LugiaEX                                Pokemon      ex       hp=220  prize=2 retreat=2 weak=L ex=True mega=False
+          -> Hyper Whirlpool: 140dmg [CCC]  Flip a coin until you get tails. For each heads, discard an 
+
+  [  527] Excadrill ex                           Pokemon      ex       hp=270  prize=2 retreat=3 weak=G ex=True mega=False
+          -> Piercing Drill: 60dmg [FF]  This attack also does 60 damage to 1 of your opponentÆs Benc
+          -> Rock Tumble: 200dmg [FFF]  This attackÆs damage isnÆt affected by Resistance.
+          evolves from: Drilbur (id=81)
+
+  [  526] Drilbur                                Pokemon      Basic    hp=70   prize=1 retreat=1 weak=G ex=False mega=False
+          -> Mud-Slap: 10dmg [F]  
+          -> Corkscrew Punch: 30dmg [FF]  
+
+================================================================================
+DRAW SUPPORTERS (Iono / Prof Research equivalents)
+================================================================================
+  [ 1227] Lillie's Determination                 Supporter    ?        
+
+================================================================================
+ITEMS / TRAINERS from Sheet 3 (find by name)
+================================================================================
+  [ 1082] Hyper Aroma                            Item
+  [ 1085] Awakening Drum                         Item
+  [?????] 'poke vital' NOT FOUND
+  [ 1100] Energy Search Pro                      Item
+  [ 1110] Max Rod                                Item
+  [ 1158] Maximum Belt                           Tool
+  [ 1159] HeroÆs Cape                            Tool
+  [ 1156] Lucky Helmet                           Tool
+  [ 1174] Air Balloon                            Tool
+  [ 1118] Energy Retrieval                       Item
+  [ 1139] Energy Recycler                        Item
+  [ 1141] Premium Power Pro                      Item
+  [ 1105] Dragon Elixir                          Item
+  [ 1238] Tarragon                               Supporter
+  [?????] 'femel' NOT FOUND
+  [ 1212] Cook                                   Supporter
+  [ 1197] XerosicÆs Machinations                 Supporter
+  [ 1197] XerosicÆs Machinations                 Supporter
+
+================================================================================
+ALL STADIUMS in pool
+================================================================================
+  [ 1248] Academy at Night                       Stadium      ?        
+
+  [ 1250] Area Zero Underdepths                  Stadium      ?        
+
+  [ 1264] Battle Cage                            Stadium      ?        
+
+  [ 1242] Community Center                       Stadium      ?        
+
+  [ 1265] Dizzying Valley                        Stadium      ?        
+
+  [ 1245] Festival Grounds                       Stadium      ?        
+
+  [ 1261] Forest of Vitality                     Stadium      ?        
+
+  [ 1244] Full Metal Lab                         Stadium      ?        
+
+  [ 1249] Grand Tree                             Stadium      ?        
+
+  [ 1258] Granite Cave                           Stadium      ?        
+
+  [ 1252] Gravity Mountain                       Stadium      ?        
+
+  [ 1246] Jamming Tower                          Stadium      ?        
+
+  [ 1254] Levincia                               Stadium      ?        
+
+  [ 1251] Lively Stadium                         Stadium      ?        
+
+  [ 1267] Lumiose City                           Stadium      ?        
+
+  [ 1263] Mystery Garden                         Stadium      ?        
+
+  [ 1247] Neutralization Zone                    Stadium      ?        
+
+  [ 1266] Nighttime Mine                         Stadium      ?        
+
+  [ 1253] NÆs Castle                             Stadium      ?        
+
+  [ 1243] Perilous Jungle                        Stadium      ?        
+
+  [ 1255] Postwick                               Stadium      ?        
+
+  [ 1260] Risky Ruins                            Stadium      ?        
+
+  [ 1259] Spikemuth Gym                          Stadium      ?        
+
+  [ 1262] Surfing Beach                          Stadium      ?        
+
+  [ 1257] Team Rocket's Factory                  Stadium      ?        
+
+  [ 1256] Team Rocket's Watchtower               Stadium      ?        
+
+================================================================================
+ALL SUPPORTERS by name
+================================================================================
+  [ 1228] Acerola's Mischief
+  [ 1207] Amarys
+  [ 1234] Anthea & Concordia
+  [ 1190] BiancaÆs Devotion
+  [ 1181] Billy & O'Nare
+  [ 1211] Black BeltÆs Training
+  [ 1182] BossÆs Orders
+  [ 1201] Briar
+  [ 1210] BrockÆs Scouting
+  [ 1233] Canari
+  [ 1192] Carmine
+  [ 1196] Cassiopeia
+  [ 1224] Cheren
+  [ 1188] CiphermaniacÆs Codebreaking
+  [ 1194] ColressÆs Tenacity
+  [ 1212] Cook
+  [ 1198] Crispin
+  [ 1205] Cyrano
+  [ 1231] Dawn
+  [ 1202] Drayton
+  [ 1214] Emcee's Hype
+  [ 1186] Eri
+  [ 1215] Ethan's Adventure
+  [ 1185] ExplorerÆs Guidance
+  [ 1222] Fennel
+  [ 1232] Firebreather
+  [ 1230] Grimsley's Move
+  [ 1223] Harlequin
+  [ 1193] Hassel
+  [ 1225] Hilda
+  [ 1208] IrisÆs Fighting Spirit
+  [ 1241] Jacinthe
+  [ 1195] JanineÆs Secret Art
+  [ 1213] Judge
+  [ 1191] Kieran
+  [ 1200] Kofu
+  [ 1199] Lacey
+  [ 1184] LanaÆs Aid
+  [ 1206] LarryÆs Skill
+  [ 1227] Lillie's Determination
+  [ 1204] LisiaÆs Appeal
+  [ 1226] Lt. Surge's Bargain
+  [ 1237] Lucian
+  [ 1187] MortyÆs Conviction
+  [ 1221] N's Plan
+  [ 1239] Naveen
+  [ 1183] Perrin
+  [ 1240] Rosa's Encouragement
+  [ 1209] Ruffian
+  [ 1189] Salvatore
+  [ 1203] Surfer
+  [ 1238] Tarragon
+  [ 1217] Team Rocket's Archer
+  [ 1216] Team Rocket's Ariana
+  [ 1218] Team Rocket's Giovanni
+  [ 1219] Team Rocket's Petrel
+  [ 1220] Team Rocket's Proton
+  [ 1236] Urbain
+  [ 1235] Waitress
+  [ 1229] Wally's Compassion
+  [ 1197] XerosicÆs Machinations
+
+================================================================================
+TRAINER-THEMED POKEMON (Ethan, Cynthia, Team Rocket)
+================================================================================
+  [  365] Cynthia's Feebas                       Pokemon      Basic    hp=30   prize=1 retreat=1 weak=L ex=False mega=False
+          -> Undulate: 10dmg [C]  Flip a coin. If heads, during your opponentÆs next turn, pre
+
+  [  380] Cynthia's Gabite                       Pokemon      S1       hp=100  prize=1 retreat=1 weak=G ex=False mega=False
+          -> Dragonslice: 40dmg [F]  
+          evolves from: Cynthia's Gible (id=379)
+
+  [  381] Cynthia's Garchomp ex                  Pokemon      ex       hp=330  prize=2 retreat=0 weak=G ex=True mega=False
+          -> Corkscrew Dive: 100dmg [F]  You may draw cards until you have 6 cards in your hand.
+          -> Draconic Buster: 260dmg [FF]  Discard all Energy from this PokΘmon.
+          evolves from: Cynthia's Gabite (id=380)
+
+  [  379] Cynthia's Gible                        Pokemon      Basic    hp=70   prize=1 retreat=1 weak=G ex=False mega=False
+          -> Rock Hurl: 20dmg [F]  This attackÆs damage isnÆt affected by Resistance.
+
+  [  366] Cynthia's Milotic                      Pokemon      S1       hp=130  prize=1 retreat=2 weak=L ex=False mega=False
+          -> Aqua Split: 60dmg [WC]  This attack also does 30 damage to 2 of your opponentÆs Benc
+          evolves from: Cynthia's Feebas (id=365)
+
+  [  341] Cynthia's Roselia                      Pokemon      Basic    hp=70   prize=1 retreat=1 weak=R ex=False mega=False
+          -> Spike Sting: 20dmg [C]  
+
+  [  342] Cynthia's Roserade                     Pokemon      S1       hp=130  prize=1 retreat=1 weak=R ex=False mega=False
+          -> Leaf Step: 80dmg [GCC]  
+          evolves from: Cynthia's Roselia (id=341)
+
+  [  387] Cynthia's Spiritomb                    Pokemon      Basic    hp=70   prize=1 retreat=1 weak=G ex=False mega=False
+          -> Raging Curse: 0dmg [C]  This attack does 10 damage for each damage counter on all of
+
+  [  352] Ethan's Cyndaquil                      Pokemon      Basic    hp=70   prize=1 retreat=1 weak=W ex=False mega=False
+          -> Ember: 30dmg [R]  Discard an Energy from this PokΘmon.
+
+  [  357] Ethan's Ho-Oh ex                       Pokemon      ex       hp=230  prize=2 retreat=2 weak=W ex=True mega=False
+          -> Shining Feathers: 160dmg [RRRR]  Heal 50 damage from each of your PokΘmon.
+
+  [  356] Ethan's Magcargo                       Pokemon      S1       hp=130  prize=1 retreat=3 weak=W ex=False mega=False
+          -> Lava Burst: 0dmg [RRR]  Discard up to 5 {R} Energy from this PokΘmon. This attack do
+          evolves from: Ethan's Slugma (id=355)
+
+  [  373] Ethan's Pichu                          Pokemon      Basic    hp=30   prize=1 retreat=0 weak=F ex=False mega=False
+          -> Zapping Draw: 30dmg [free]  Draw a card.
+
+  [  338] Ethan's Pinsir                         Pokemon      Basic    hp=120  prize=1 retreat=2 weak=R ex=False mega=False
+          -> Vise Grip: 20dmg [G]  
+          -> Rallying Horn: 70dmg [CCC]  If any of your EthanÆs PokΘmon were Knocked Out by damage fr
+
+  [  353] Ethan's Quilava                        Pokemon      S1       hp=100  prize=1 retreat=1 weak=W ex=False mega=False
+          -> Combustion: 40dmg [R]  
+          evolves from: Ethan's Cyndaquil (id=352)
+
+  [  355] Ethan's Slugma                         Pokemon      Basic    hp=80   prize=1 retreat=2 weak=W ex=False mega=False
+          -> Steady Firebreathing: 20dmg [R]  
+
+  [  378] Ethan's Sudowoodo                      Pokemon      Basic    hp=110  prize=1 retreat=1 weak=G ex=False mega=False
+          -> Impound: 20dmg [F]  During your opponentÆs next turn, the Defending PokΘmon canÆ
+          -> Try to Imitate: 0dmg [CC]  Flip a coin. If heads, choose 1 of your opponentÆs Active Po
+
+  [  354] Ethan's Typhlosion                     Pokemon      S2       hp=170  prize=1 retreat=2 weak=W ex=False mega=False
+          -> Buddy Blast: 40dmg [R]  This attack does 60 more damage for each EthanÆs Adventure c
+          -> Steam Artillery: 160dmg [RRC]  
+          evolves from: Ethan's Quilava (id=353)
+
+  [  428] Team Rocket's Ampharos                 Pokemon      S2       hp=140  prize=1 retreat=2 weak=F ex=False mega=False
+          -> Head Bolt: 140dmg [LCC]  
+          evolves from: Team Rocket's Flaaffy (id=427)
+
+  [  449] Team Rocket's Arbok                    Pokemon      S1       hp=130  prize=1 retreat=2 weak=F ex=False mega=False
+          -> Spinning Tail: 0dmg [DDD]  This attack does 30 damage to each of your opponentÆs PokΘmo
+          evolves from: Team Rocket's Ekans (id=448)
+
+  [  414] Team Rocket's Articuno                 Pokemon      Basic    hp=120  prize=1 retreat=1 weak=L ex=False mega=False
+          -> Dark Frost: 60dmg [WCC]  If this PokΘmon has any Team RocketÆs Energy attached, this 
+
+  [  399] Team Rocket's Blipbug                  Pokemon      Basic    hp=60   prize=1 retreat=1 weak=R ex=False mega=False
+          -> Searching Eyes: 0dmg [C]  Look at 1 of your opponentÆs face-down Prize cards.
+
+  [  433] Team Rocket's Chingling                Pokemon      Basic    hp=30   prize=1 retreat=0 weak=D ex=False mega=False
+          -> Chiming Commotion: 0dmg [free]  Discard a random card from your opponentÆs hand.
+
+  [  458] Team Rocket's Crobat ex                Pokemon      ex       hp=310  prize=2 retreat=1 weak=L ex=True mega=False
+          -> AssassinÆs Return: 120dmg [DD]  You may put this PokΘmon into your hand. (Discard all cards 
+          evolves from: Team Rocket's Golbat (id=457)
+
+  [  881] Team Rocket's Diglett                  Pokemon      Basic    hp=60   prize=1 retreat=1 weak=G ex=False mega=False
+          -> Relentless Burrowing: 0dmg [F]  Flip a coin until you get tails. For each heads, discard the
+
+  [  435] Team Rocket's Dottler                  Pokemon      S1       hp=80   prize=1 retreat=2 weak=D ex=False mega=False
+          -> Disruptive Radar: 0dmg [C]  Look at the top 5 cards of your opponentÆs deck and put them
+          -> Super Psy Bolt: 30dmg [PC]  
+          evolves from: Team Rocket's Blipbug (id=399)
+
+  [  429] Team Rocket's Drowzee                  Pokemon      Basic    hp=80   prize=1 retreat=2 weak=D ex=False mega=False
+          -> Hypnotic Ray: 10dmg [P]  Your opponentÆs Active PokΘmon is now Asleep.
+
+  [  882] Team Rocket's Dugtrio                  Pokemon      S1       hp=100  prize=1 retreat=1 weak=G ex=False mega=False
+          -> Mud Shot: 50dmg [FC]  
+          evolves from: Team Rocket's Diglett (id=881)
+
+  [  448] Team Rocket's Ekans                    Pokemon      Basic    hp=70   prize=1 retreat=1 weak=F ex=False mega=False
+          -> Drag Down: 0dmg [C]  Flip a coin. If heads, your opponentÆs Active PokΘmon is now
+          -> Gnaw: 10dmg [D]  
+
+  [  873] Team Rocket's Exeggcute                Pokemon      Basic    hp=60   prize=1 retreat=1 weak=D ex=False mega=False
+          -> Focused Wish: 10dmg [P]  Flip a coin. If heads, this attack does 20 more damage.
+
+  [  874] Team Rocket's Exeggutor                Pokemon      S1       hp=140  prize=1 retreat=3 weak=D ex=False mega=False
+          -> Tri Kinesis: 0dmg [CC]  Flip 3 coins. If all of them are heads, Knock Out 1 of your 
+          -> Double-Edge: 150dmg [PCC]  This PokΘmon also does 30 damage to itself.
+          evolves from: Team Rocket's Exeggcute (id=873)
+
+  [  427] Team Rocket's Flaaffy                  Pokemon      S1       hp=90   prize=1 retreat=2 weak=F ex=False mega=False
+          -> Thunder Shock: 50dmg [LC]  Flip a coin. If heads, your opponentÆs Active PokΘmon is now
+          evolves from: Team Rocket's Mareep (id=426)
+
+  [  457] Team Rocket's Golbat                   Pokemon      S1       hp=80   prize=1 retreat=1 weak=L ex=False mega=False
+          -> Confuse Ray: 30dmg [D]  Your opponentÆs Active PokΘmon is now Confused.
+          evolves from: Team Rocket's Zubat (id=456)
+
+  [  459] Team Rocket's Grimer                   Pokemon      Basic    hp=80   prize=1 retreat=3 weak=F ex=False mega=False
+          -> Corrosive Sludge: 0dmg [DC]  At the end of your opponentÆs next turn, discard the Defendi
+
+  [  891] Team Rocket's Honchkrow                Pokemon      S1       hp=130  prize=1 retreat=1 weak=L ex=False mega=False
+          -> Rocket Feathers: 0dmg [CC]  You may discard any number of Supporter cards that have ôTea
+          -> Hammer In: 100dmg [DCC]  
+          evolves from: Team Rocket's Murkrow (id=463)
+
+  [  409] Team Rocket's Houndoom                 Pokemon      S1       hp=130  prize=1 retreat=2 weak=W ex=False mega=False
+          -> Cruel Coal: 0dmg [R]  Your opponentÆs Active PokΘmon is now Burned and Confused.
+          -> Scorching Fire: 120dmg [RC]  Discard an Energy from this PokΘmon.
+          evolves from: Team Rocket's Houndour (id=408)
+
+  [  408] Team Rocket's Houndour                 Pokemon      Basic    hp=70   prize=1 retreat=1 weak=W ex=False mega=False
+python : Traceback (most recent call last):
+At line:1 char:98
++ ... YTHONPATH="src;submission" ; python tools/probe_cards.py 2>&1 | Out-F ...
++                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last) 
+   ::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+          -> Steady Firebreathing: 20dmg [R]  
+
+  [  430] Team Rocket's Hypno                    Pokemon      S1       hp=130  prize=1 retreat=2 weak=D ex=False mega=False
+          -> Psyshot: 40dmg [P]  
+          -> Bench Manipulation: 0dmg [PPP]  Your opponent flips a coin for each of their Benched PokΘmon
+          evolves from: Team Rocket's Drowzee (id=429)
+
+  [   24] Team Rocket's Kangaskhan ex            Pokemon      ex       hp=230  prize=2 retreat=2 weak=F ex=True mega=False
+          -> Comet Punch: 0dmg [CC]  Flip 4 coins. This attack does 30 damage for each heads.
+          -> Wicked Impact: 120dmg [CCC]  If you played a Supporter card that has ôTeam Rocketö in its
+
+  [  461] Team Rocket's Koffing                  Pokemon      Basic    hp=70   prize=1 retreat=1 weak=F ex=False mega=False
+          -> Leaking Gas: 30dmg [DC]  
+
+  [  440] Team Rocket's Larvitar                 Pokemon      Basic    hp=70   prize=1 retreat=1 weak=G ex=False mega=False
+          -> Mountain Munch: 10dmg [C]  Discard the top card of your opponentÆs deck.
+
+  [  426] Team Rocket's Mareep                   Pokemon      Basic    hp=60   prize=1 retreat=1 weak=F ex=False mega=False
+          -> Procurement: 0dmg [C]  Search your deck for an Item card, reveal it, and put it int
+          -> Tiny Bolt: 10dmg [L]  
+
+  [  470] Team Rocket's Meowth                   Pokemon      Basic    hp=70   prize=1 retreat=1 weak=F ex=False mega=False
+          -> Paw-cket Pilfer: 0dmg [C]  Choose a random card from your opponentÆs hand. Your opponen
+          -> Fury Swipes: 0dmg [CC]  Flip 3 coins. This attack does 20 damage for each heads.
+
+  [  431] Team Rocket's Mewtwo ex                Pokemon      ex       hp=280  prize=2 retreat=3 weak=D ex=True mega=False
+          -> Erasure Ball: 160dmg [PPC]  You may discard up to 2 Energy from your Benched PokΘmon. Th
+
+  [  434] Team Rocket's Mimikyu                  Pokemon      Basic    hp=60   prize=1 retreat=0 weak=D ex=False mega=False
+          -> Gemstone Mimicry: 0dmg [PC]  Choose 1 of your opponentÆs Active Tera PokΘmonÆs attacks an
+
+  [  407] Team Rocket's Moltres ex               Pokemon      ex       hp=220  prize=2 retreat=2 weak=L ex=True mega=False
+          -> Flame Screen: 110dmg [RCC]  During your opponentÆs next turn, this PokΘmon takes 50 less
+          -> Evil Incineration: 0dmg [RCCC]  Discard a Team RocketÆs Energy from this PokΘmon. If you do,
+
+  [  460] Team Rocket's Muk                      Pokemon      S1       hp=150  prize=1 retreat=4 weak=F ex=False mega=False
+          -> Gooped Up: 40dmg [DC]  Your opponentÆs Active PokΘmon is now Confused. During your 
+          -> Hazardous Venom: 0dmg [DDC]  This attack does 100 damage for each Special Condition affec
+          evolves from: Team Rocket's Grimer (id=459)
+
+  [  463] Team Rocket's Murkrow                  Pokemon      Basic    hp=80   prize=1 retreat=1 weak=L ex=False mega=False
+          -> Deceit: 0dmg [C]  Search your deck for a Supporter card, reveal it, and put it
+          -> Torment: 30dmg [DC]  Choose 1 of your opponentÆs Active PokΘmonÆs attacks. During
+
+  [  455] Team Rocket's Nidoking ex              Pokemon      ex       hp=330  prize=2 retreat=3 weak=F ex=True mega=False
+          -> Tainted Horn: 100dmg [DDC]  Your opponentÆs Active PokΘmon is now Poisoned. During PokΘm
+          -> Kingly Impact: 240dmg [DDDC]  
+  File "C:\Users\a546625\OneDrive - Volvo Group\PTCG AI 
+Battle\tools\probe_cards.py", line 123, in <module>
+    show_card(c.cardId)
+    ~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\a546625\OneDrive - Volvo Group\PTCG AI 
+Battle\tools\probe_cards.py", line 27, in show_card
+    print(f"  [{cid:5}] {c.name:<38} {CTYPE.get(c.cardType,'?'):<12} 
+{stage(c):<8}", end='')
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^
+  File "C:\Program Files\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2640' in 
+position 31: character maps to <undefined>
+          evolves from: Team Rocket's Nidorino (id=454)
+
+  [  452] Team Rocket's Nidoqueen                Pokemon      S2       hp=170  prize=1 retreat=3 weak=F ex=False mega=False
+          -> Love Impact: 60dmg [D]  If a PokΘmon that has "Nidoking" in its name is on your Benc
+          -> Mega Kick: 130dmg [DD]  
+          evolves from: Team Rocket's Nidorina (id=451)
+

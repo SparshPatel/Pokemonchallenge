@@ -1,0 +1,4 @@
+H2H: A=planner(b4/d6/k2) vs B=planner(b4/d6/k2) | deck=deck.csv | games=60 think=0.1s
+A wins 28/60 = 0.467 +-0.064  (draws 0)  z_vs_0.5=-0.52
+wall=260.8s (4.35s/game)
+DONE

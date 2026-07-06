@@ -1,0 +1,22 @@
+# Competition data (subject to Kaggle rules — do not commit)
+pokemon-tcg-ai-battle-challenge-strategy.zip
+data/raw/
+data/sim_sample/
+
+# cabt engine (provided by competition; not redistributable)
+submission/cg/
+
+# Build artifacts and results
+artifacts/
+results/
+*.tar.gz
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

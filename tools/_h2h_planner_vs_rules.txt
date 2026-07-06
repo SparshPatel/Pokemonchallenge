@@ -1,0 +1,4 @@
+H2H: A=planner vs B=rules | deck=deck.csv | games=60 think=0.12s
+A wins 39/60 = 0.650 +-0.062  (draws 0)  z_vs_0.5=+2.44
+wall=104.9s (1.75s/game)
+DONE

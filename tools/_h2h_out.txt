@@ -1,0 +1,4 @@
+H2H: A=planner(b4/d6/k2/t0.6) vs B=planner(b4/d6/k2/t0.6) | deck_a=deck_v3_fastbasics.csv deck_b=deck.csv | games=40
+A wins 12/40 = 0.300 +-0.072  (draws 0)  z_vs_0.5=-2.76
+wall=444.7s (11.12s/game)
+DONE
