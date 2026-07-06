@@ -193,6 +193,50 @@ class CardDB:
             )
         return cls(cards)
 
+    @classmethod
+    def from_cards_json(cls, path: str | Path) -> "CardDB":
+        """Build a (feature-reduced) CardDB from the bundled ``cards.json``.
+
+        ``cards.json`` is the runtime card feature dump that ships inside the
+        submission; it carries enough per-card metadata (type, hp, best damage,
+        stage, rule) for deck generation and field evaluation even when the full
+        ``EN_Card_Data.csv`` (competition data, not committed) is unavailable.
+        Only a single synthetic best-damage Move is reconstructed per card.
+        """
+        import json
+
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        cards: dict[int, Card] = {}
+        for c in raw:
+            cid = c.get("card_id")
+            if cid is None:
+                continue
+            best = int(c.get("best_damage") or 0)
+            moves = (
+                [Move(name="attack", cost={}, cost_total=0, damage=best,
+                      damage_variable=False, effect="", is_ability=False)]
+                if best > 0 else []
+            )
+            cards[cid] = Card(
+                card_id=cid,
+                name=str(c.get("name", "")),
+                expansion="",
+                collection_no="",
+                category="",
+                stage_type=str(c.get("stage_type", "")),
+                rule=str(c.get("rule", "")),
+                previous_stage="",
+                hp=int(c["hp"]) if c.get("hp") is not None else None,
+                types=list(c.get("types", []) or []),
+                weakness=list(c.get("weakness", []) or []),
+                resistance=[],
+                retreat=int(c["retreat"]) if c.get("retreat") is not None else None,
+                moves=moves,
+                text="",
+            )
+        return cls(cards)
+
 
 def _clean(text: str) -> str:
     return "" if text.strip() in ("n/a", "nan") else text.strip()
@@ -222,7 +266,18 @@ def _row_to_move(row: pd.Series) -> Move | None:
 
 
 def load_default(lang: str = "EN") -> CardDB:
-    """Load the bundled card database for the given language (``EN`` or ``JP``)."""
+    """Load the bundled card database for the given language (``EN`` or ``JP``).
+
+    Prefers the full competition CSV (``data/raw/{lang}_Card_Data.csv``) when it
+    is present; otherwise falls back to the committed ``submission/cards.json``
+    feature dump so offline deck generation and evaluation work without the
+    (non-redistributable) competition data.
+    """
     root = Path(__file__).resolve().parents[2]
     path = root / "data" / "raw" / f"{lang}_Card_Data.csv"
-    return CardDB.from_csv(path)
+    if path.exists():
+        return CardDB.from_csv(path)
+    cards_json = root / "submission" / "cards.json"
+    if cards_json.exists():
+        return CardDB.from_cards_json(cards_json)
+    return CardDB.from_csv(path)  # raise the original FileNotFoundError
