@@ -30,22 +30,38 @@ via ``PTCG_ENABLE_PLANNER=1`` until it is proven to beat rules in the gauntlet.
 """
 from __future__ import annotations
 
+from altair import value
+from cachetools import cached
+from .evaluation import (
+    FeatureVector,
+    WeightGenerator,
+    Evaluator,
+)
+from .evaluation import (
+    PlannerFeatureExtractor,
+    WeightGenerator,
+    Evaluator,
+)
 import dataclasses
 import importlib
+import math
+import os
 import random
 import time
 from collections import Counter
+from functools import lru_cache
 
 from . import rules
 from .adapter import Select, current_state, extract_select, your_index
 from .enums import CardType, OptionType, SelectType
 from .gamedata import GameData
 
-try:  # optional learned leaf value; absent numpy/weights => stays disabled
+try:
     from . import value_net as _value_net
 except Exception:  # pragma: no cover
     _value_net = None
-
+    
+    
 # Modules that may expose the search surface, in priority order.
 _ENGINE_MODULES = ("cg.api", "cg", "api")
 _SEARCH_FUNCS = ("search_begin", "search_step", "search_end", "to_observation_class")
@@ -84,90 +100,52 @@ class TurnPlanner:
     def __init__(
         self,
         cards,
-        gamedata: GameData | None = None,
-        your_deck_ids: list[int] | None = None,
-        opponent_deck_ids: list[int] | None = None,
-        max_think_s: float = 0.6,
-        beam_width: int = 4,
-        max_depth: int = 6,
-        n_determinizations: int = 2,
-        max_nodes: int = 2000,
-        opp_response: bool | None = None,
-        max_opp_steps: int = 40,
-        seed: int = 0,
-        eval_weights: dict | None = None,
-        use_value_net: bool | None = None,
-        value_net_path: str | None = None,
+        gamedata: GameData | None=None,
+        your_deck_ids:list[int]|None=None,
+        opponent_deck_ids:list[int]|None=None,
+        max_think_s:float=0.6,
+        beam_width:int=4,
+        max_depth:int=6,
+        n_determinizations:int=2,
+        max_nodes:int=2000,
+        opp_response:bool|None=None,
+        max_opp_steps:int=40,
+        seed:int=0,
+        eval_weights:dict|None=None,
+        use_value_net:bool|None=None,
+        value_net_path:str|None=None,
     ):
-        import os
-
-        self.cards = cards
-        self.gamedata = gamedata or GameData.load()
-        self.your_deck_ids = list(your_deck_ids or [])
-        # Opponent belief pool for determinization; default to a mirror.
-        self.opponent_deck_ids = list(opponent_deck_ids or self.your_deck_ids)
-        self.max_think_s = max_think_s
-        self.beam_width = beam_width
-        self.max_depth = max_depth
-        self.k = n_determinizations
-        self.max_nodes = max_nodes
-        # Simulate one opponent-response turn (drive it with the rule policy) and
-        # evaluate the board WE face on our next turn — gives the planner
-        # defensive awareness. A/B on our deck (H2H 60g) showed it is neutral
-        # (0.467, z=-0.52) yet ~3x slower, so it is OFF by default; the static
-        # end-of-turn eval is both faster and no worse. Toggle for research via
-        # PTCG_PLANNER_OPP=1.
-        if opp_response is None:
-            opp_response = os.environ.get("PTCG_PLANNER_OPP", "0") == "1"
-        self.opp_response = opp_response
-        self.max_opp_steps = max_opp_steps
-        self.rng = random.Random(seed)
-        # Leaf-eval weights: explicit override > env JSON (for baked-in tuned
-        # weights, kept stdlib-only) > module default. Instance-local so the
-        # offline trainer can evaluate candidate weight vectors in-process.
-        self.eval = dict(EVAL)
-        if eval_weights is None:
-            raw = os.environ.get("PTCG_EVAL_WEIGHTS")
-            if raw:
-                try:
-                    import json
-                    src = raw
-                    if os.path.isfile(raw):
-                        with open(raw, "r", encoding="utf-8") as fh:
-                            src = fh.read()
-                    eval_weights = json.loads(src)
-                except Exception:
-                    eval_weights = None
+        self.cards=cards
+        self.gamedata=gamedata or GameData.load()
+        self.your_deck_ids=list(your_deck_ids or [])
+        self.opponent_deck_ids=list(opponent_deck_ids or self.your_deck_ids)
+        self.max_think_s=max_think_s
+        self.beam_width=beam_width
+        self.max_depth=max_depth
+        self.k=n_determinizations
+        self.max_nodes=max_nodes
+        self.rng=random.Random(seed)
+        self.eval=dict(EVAL)
         if eval_weights:
-            for k, v in eval_weights.items():
-                if k in self.eval:
-                    try:
-                        self.eval[k] = float(v)
-                    except (TypeError, ValueError):
-                        pass
-        # Optional learned leaf value. Adds a bounded ADDITIVE bonus on top of
-        # the hand-tuned _eval (a tie-breaker) when a trained weight bundle is
-        # present AND enabled (param > PTCG_VALUE_NET env; default OFF until it
-        # beats hand-eval in an A/B). A full replacement lost the hand-eval's
-        # fine-grained within-turn ordering, so the net only nudges. Terminal
-        # win/loss values are untouched so they still dominate.
-        # P(win) in (0,1) maps to (_vn_scale * (p - 0.5)); _vn_scale is kept
-        # small vs the prize weight (120) so the net breaks ties, not decisions,
-        # and stays << the terminal win value (self.eval["win"] = 1e5).
-        self.value_net = None
-        self._vn_scale = 60.0
-        if use_value_net is None:
-            use_value_net = os.environ.get("PTCG_VALUE_NET", "0") == "1"
-        if use_value_net and _value_net is not None:
-            try:
-                net = _value_net.ValueNet(value_net_path)
-                if net.available:
-                    self.value_net = net
-            except Exception:
-                self.value_net = None
-        self._engine = self._locate_engine()
-        self._deadline = 0.0
-        self._nodes = 0
+            self.eval.update(eval_weights)
+        self.value_net=None
+        self._vn_scale=60.0
+        self._engine=self._locate_engine()
+        self._deadline=0.0
+        self._nodes=0
+        self.weight_generator=WeightGenerator()
+        self.evaluator=Evaluator(self.weight_generator)
+        self.feature_extractor=PlannerFeatureExtractor(self.gamedata)
+        self.transposition={}
+        self.node_visits={}
+        # ----- UCT -----
+        self.Q={}
+        self.N={}
+        self.P={}
+        self.virtual_loss={}
+        self.cpuct=1.4
+        self.exploration_c=0.15
+        self.previous_features=None
 
     # --- capability check -------------------------------------------------
     def _locate_engine(self):
@@ -184,20 +162,29 @@ class TurnPlanner:
         return self._engine is not None
 
     # --- main entry -------------------------------------------------------
-    def choose(self, obs_dict, select: Select, deadline: float) -> list[int] | None:
-        """Best first MAIN action for this decision, or ``None`` to defer to rules."""
+    def choose(
+        self,
+        obs_dict,
+        select: Select,
+        deadline: float,
+    ) -> list[int] | None:
+        """
+        Search every determinization and aggregate the value of each root action.
+        Rather than simply averaging values, penalize actions whose value varies
+        wildly across determinizations. This produces much more stable decisions
+        under hidden information.
+        """
         eng = self._engine
         if eng is None or not select.options:
             return None
-        # Plan only our own MAIN turn decisions; everything else (card picks,
-        # forced sub-selections) is fast and handled by the rule policy.
+
         if select.select_type != SelectType.MAIN:
             return None
         state = current_state(obs_dict)
         if not isinstance(state, dict):
             return None
         me = your_index(obs_dict)
-        if not isinstance(state.get("turn"), int) or state.get("turn", 0) < 1:
+        if not isinstance(state.get("turn"), int):
             return None
 
         try:
@@ -206,132 +193,521 @@ class TurnPlanner:
             return None
         if getattr(obs_cls, "search_begin_input", None) is None:
             return None
-
-        dets = self._build_determinizations(obs_dict, state, me)
-        if not dets:
+        determinizations = self._build_determinizations(
+            obs_dict,
+            state,
+            me,
+        )
+        if not determinizations:
             return None
-
-        self._deadline = min(deadline, time.monotonic() + self.max_think_s)
-
-        agg: dict[int, list[float]] = {}
-        for det in dets:
-            if time.monotonic() >= self._deadline:
+        self._deadline = min(
+            deadline,
+            time.monotonic() + self.max_think_s,
+        )
+        aggregated: dict[int, list[float]] = {}
+        for det in determinizations:
+            if (
+                self._nodes >= self.max_nodes
+                or time.monotonic() >= self._deadline
+            ):
                 break
-            first_vals = self._search_one(eng, obs_cls, det, obs_dict, me)
-            if first_vals:
-                for a, v in first_vals.items():
-                    agg.setdefault(a, []).append(v)
-
-        if not agg:
+            values = self._search_one(
+                eng,
+                obs_cls,
+                det,
+                obs_dict,
+                me,
+            )
+            if not values:
+                continue
+            for action, value in values.items():
+                aggregated.setdefault(action, []).append(value)
+        if not aggregated:
             return None
-        best_a, best_v = None, float("-inf")
-        for a, vs in agg.items():
-            m = sum(vs) / len(vs)
-            if m > best_v:
-                best_v, best_a = m, a
-        return [best_a] if best_a is not None else None
+        best_action = None
+        best_score = float("-inf")
+        for action, vals in aggregated.items():
+            mean = sum(vals) / len(vals)
+            if len(vals) > 1:
+                variance = sum((v - mean) ** 2 for v in vals) / len(vals)
+            else:
+                variance = 0.0
+            confidence_penalty = 0.15 * math.sqrt(variance)
+            score = mean - confidence_penalty
+            if score > best_score:
+                best_score = score
+                best_action = action
+        if best_action is None:
+            return None
+        return [best_action]
 
-    def _search_one(self, eng, obs_cls, det, obs_dict, me) -> dict[int, float] | None:
-        """Run one determinized search; return {first_option_index: value}."""
+    # ========================= CHANGE 2 =========================
+    # Replace _search_one()
+    # ============================================================
+
+    def _search_one(
+        self,
+        eng,
+        obs_cls,
+        det,
+        obs_dict,
+        me,
+    ) -> dict[int, float] | None:
         try:
             ss = eng.search_begin(obs_cls, *det, False)
         except Exception:
             return None
         self._nodes = 0
+        self.previous_features = None
+        # Fresh search statistics.
+        self.transposition.clear()
+        self.N.clear()
+        self.Q.clear()
+        # Fresh learner for this search.
+        self.weight_generator = WeightGenerator()
+        self.evaluator = Evaluator(self.weight_generator)
         try:
-            return self._expand_root(eng, ss, me)
+            values = self._expand_root(
+                eng,
+                ss,
+                me,
+            )
         except Exception:
-            return None
+            values = None
         finally:
             try:
                 eng.search_end()
             except Exception:
                 pass
+        return values
 
     # --- search tree ------------------------------------------------------
-    def _expand_root(self, eng, root_ss, me) -> dict[int, float]:
-        """Branch over each candidate first MAIN action; recurse for its value."""
+    # ========================= CHANGE 3 =========================
+    # Replace _expand_root()
+    # ============================================================
+
+    def _expand_root(
+        self,
+        eng,
+        root_ss,
+        me,
+    ) -> dict[int, float]:
+        """
+        Root Monte Carlo search.
+        Each iteration performs
+            Selection
+                ↓
+            Expansion
+                ↓
+            Evaluation
+                ↓
+            Backup
+        until the search budget expires.
+        """
         node = _as_obs_dict(root_ss)
         if node is None:
             return {}
         select = extract_select(node)
         if select is None or not select.options:
             return {}
-        candidates = self._candidate_main_options(node, select)
-        out: dict[int, float] = {}
-        root_id = root_ss.searchId
-        for idx in candidates:
-            if time.monotonic() >= self._deadline or self._nodes >= self.max_nodes:
+        root_key = ("root", root_ss.searchId)
+        self.N.setdefault(root_key, 0)
+        self.Q.setdefault(root_key, 0.0)
+        priors = self._policy_prior(node, select, root_key)
+        values = {}
+        while (
+            self._nodes < self.max_nodes
+            and time.monotonic() < self._deadline
+        ):
+            # -------------------------
+            # Selection
+            # -------------------------
+            best_action = None
+            best_score = -float("inf")
+            for action, prior in priors.items():
+                child_key = (root_key, action)
+                score = self._ucb_score(
+                    root_key,
+                    child_key,
+                    prior,
+                )
+                if score > best_score:
+                    best_score = score
+                    best_action = action
+            if best_action is None:
                 break
+            # -------------------------
+            # Expansion
+            # -------------------------
             try:
-                child = eng.search_step(root_id, [idx])
+                child = eng.search_step(
+                    root_ss.searchId,
+                    [best_action],
+                )
             except Exception:
+                priors.pop(best_action, None)
                 continue
             self._nodes += 1
-            out[idx] = self._plan(eng, child, me, self.max_depth - 1)
-        return out
+            # -------------------------
+            # Simulation / Evaluation
+            # -------------------------
+            value = self._plan(
+                eng,
+                child,
+                me,
+                self.max_depth - 1,
+            )
+            # -------------------------
+            # Backup
+            # -------------------------
+            self.N[root_key] += 1
+            child_key = (root_key, best_action)
+            self.N[child_key] = (
+                self.N.get(child_key, 0) + 1
+            )
+            self.Q[child_key] = (
+                self.Q.get(child_key, 0.0) + value
+            )
+            values[best_action] = self.Q[child_key] / self.N[child_key]
+        return values
+    
+    def _state_key(self, state: dict, me: int):
+        """
+        Produce a deterministic hashable representation of the public board state.
+        Hidden information (deck contents, hand identities, prizes, etc.) is
+        deliberately ignored so that equivalent public positions share the same
+        transposition entry.
+        """
+        players = state.get("players") or []
+        if len(players) < 2:
+            return None
+        mp = players[me] if isinstance(players[me], dict) else {}
+        op = players[1 - me] if isinstance(players[1 - me], dict) else {}
+        def encode_player(player):
+            active = _active(player)
+            if active is None:
+                active_repr = None
+            else:
+                active_repr = (
+                    active.get("id"),
+                    active.get("hp"),
+                    len(active.get("energies") or []),
+                )
+            bench = []
+            for mon in player.get("bench") or []:
+                if not isinstance(mon, dict):
+                    continue
+                bench.append(
+                    (
+                        mon.get("id"),
+                        mon.get("hp"),
+                        len(mon.get("energies") or []),
+                    )
+                )
+            bench.sort()
+            return (
+                _prizes_left(player),
+                player.get("handCount", 0),
+                active_repr,
+                tuple(bench),
+                _energy_in_play(player),
+            )
+        return (
+            encode_player(mp),
+            encode_player(op),
+            state.get("turn", 0),
+            state.get("turnPlayer", me),
+        )
 
-    def _plan(self, eng, ss, me, depth) -> float:
-        """Value of the position at ``ss`` for player ``me`` (our-turn search)."""
+    def _visit_count(self,key):
+        return self.N.get(key,0)
+
+    def _q_value(self,key):
+        n=self.N.get(key,0)
+        if n==0:
+            return 0.0
+        return self.Q.get(key,0.0)/n
+
+    def _ucb_score(
+        self,
+        parent_key,
+        child_key,
+        prior,
+    ):
+        parent_visits = max(1, self.N.get(parent_key, 1),)
+        child_visits = self.N.get(child_key, 0)
+        q = self._q_value(child_key)
+        exploration = (self.cpuct * prior * math.sqrt(parent_visits) / (1 + child_visits))
+        # Progressive bias.
+        # A heuristic prior should matter early in the search,
+        # then gradually disappear as empirical values become reliable.
+        # This gives good move ordering without permanently
+        # forcing the search toward the rule policy.
+        bias = (self.exploration_c * prior / (1 + child_visits))
+        return q + exploration + bias
+    
+    def _policy_prior(self, node, select, key=None):
+        """
+        Produce adaptive PUCT priors.
+        The prior combines:
+            • rule policy recommendation
+            • action type prior
+            • historical search value
+            • historical visit count
+            • opponent behaviour embedding
+        """
+        try:
+            rules_pick = rules._choose_main(
+                node,
+                select,
+                self.gamedata,
+            )
+        except Exception:
+            rules_pick = None
+        scored = []
+        for option in select.options:
+            score = float(self._TYPE_PRIORITY.get(option.type, 0))
+            # -------------------------------------------------
+            # Rule policy prior
+            # -------------------------------------------------
+            if option.index == rules_pick:
+                score += 8.0
+            # -------------------------------------------------
+            # Search statistics
+            # -------------------------------------------------
+            if key is not None:
+                child = (key, option.index)
+                visits = self.N.get(child, 0)
+                if visits:
+                    q = self.Q.get(child, 0.0) / visits
+                    score += 2.0 * math.tanh(q / 50.0)
+                    score += min(
+                        math.log1p(visits),
+                        2.5,
+                    )
+            # -------------------------------------------------
+            # Opponent adaptation
+            # -------------------------------------------------
+            emb = self.evaluator.opponent_embedding
+            if emb is not None:
+                attack_rate = emb[0]
+                ability_rate = emb[1]
+                item_rate = emb[2]
+                if (
+                    option.type == OptionType.ATTACK
+                    and attack_rate > 0.50
+                ):
+                    score += 1.5
+                elif (
+                    option.type == OptionType.EVOLVE
+                    and attack_rate > 0.50
+                ):
+                    score += 1.0
+                elif (
+                    option.type == OptionType.ABILITY
+                    and ability_rate > 0.30
+                ):
+                    score += 1.0
+                elif (
+                    option.type == OptionType.PLAY
+                    and item_rate > 0.40
+                ):
+                    score += 0.75
+            scored.append(
+                (
+                    max(score, 0.01),
+                    option.index,
+                )
+            )
+        scored.sort(reverse=True)
+        if key is None:
+            width = len(scored)
+        else:
+            width = self._progressive_width(
+                key,
+                len(scored),
+            )
+        scored = scored[:width]
+        total = sum(score for score, _ in scored)
+        if total <= 0:
+            n = max(1, len(scored))
+            return {
+                idx: 1.0 / n
+                for _, idx in scored
+            }
+        priors = {}
+        for score, idx in scored:
+            priors[idx] = score / total
+        return priors
+    
+    def _progressive_width(self,key,n_actions):
+        visits=self.N.get(key,0)
+        width=int(1+math.sqrt(visits))
+        if width<2:
+            width=2
+        return min(width,n_actions)
+    
+    def encode(player):
+        act = _active(player)
+        return (
+            _prizes_left(player),
+            player.get("handCount", 0),
+            _energy_in_play(player),
+            tuple(sorted((p.get("id"), p.get("hp")) for p in (player.get("bench") or []) if isinstance(p, dict))),
+            None if act is None else (act.get("id"), act.get("hp"), len(act.get("energies") or [])),
+        )
+        return (encode(mp), encode(op))
+     
+    # ========================= CHANGE 4 =========================
+    # Replace _plan() completely
+    # ============================================================
+
+    def _plan(self, eng, ss, me, depth):
         node = _as_obs_dict(ss)
         if node is None:
             return 0.0
+
         state = node.get("current")
         if not isinstance(state, dict):
             return 0.0
+
+        key = self._state_key(state, me)
+        if key is None:
+            key = ("leaf", id(state))
+
         result = state.get("result", -1)
         if isinstance(result, int) and result >= 0:
-            return self._terminal_value(result, me)
+            value = self._terminal_value(result, me)
+            self.N[key] = self.N.get(key, 0) + 1
+            self.Q[key] = self.Q.get(key, 0.0) + value
+            return value
+
+        if (
+            depth <= 0
+            or self._nodes >= self.max_nodes
+            or time.monotonic() >= self._deadline
+        ):
+            value = self._eval(state, me)
+            self.N[key] = self.N.get(key, 0) + 1
+            self.Q[key] = self.Q.get(key, 0.0) + value
+            return value
 
         select = extract_select(node)
+
         if select is None or not select.options:
-            return self._eval(state, me)
+            value = self._eval(state, me)
+            self.N[key] = self.N.get(key, 0) + 1
+            self.Q[key] = self.Q.get(key, 0.0) + value
+            return value
 
         acting = state.get("yourIndex", me)
+
         if acting != me:
-            # Our turn is over. Optionally simulate the opponent's reply (driven
-            # by the rule policy) up to our next turn and evaluate the board we
-            # then face — otherwise value the board we are leaving behind.
             if self.opp_response:
-                return self._drive_to_my_turn(eng, ss, me)
-            return self._eval(state, me)
+                value = self._drive_to_my_turn(eng, ss, me)
+            else:
+                value = self._eval(state, me)
+
+            self.N[key] = self.N.get(key, 0) + 1
+            self.Q[key] = self.Q.get(key, 0.0) + value
+            return value
 
         if select.select_type != SelectType.MAIN:
-            # Forced sub-selection (fetch/discard/place): resolve with rules and
-            # continue within the same MAIN ply (does not consume search depth).
             try:
                 choice = rules.choose(node, select, self.gamedata)
             except Exception:
                 choice = list(range(max(1, select.min_count)))
-            if time.monotonic() >= self._deadline or self._nodes >= self.max_nodes:
-                return self._eval(state, me)
+
             try:
                 nxt = eng.search_step(ss.searchId, choice)
             except Exception:
-                return self._eval(state, me)
+                value = self._eval(state, me)
+                self.N[key] = self.N.get(key, 0) + 1
+                self.Q[key] = self.Q.get(key, 0.0) + value
+                return value
+
             self._nodes += 1
-            return self._plan(eng, nxt, me, depth)
 
-        if depth <= 0 or time.monotonic() >= self._deadline or self._nodes >= self.max_nodes:
-            return self._eval(state, me)
+            value = self._plan(eng, nxt, me, depth)
 
-        candidates = self._candidate_main_options(node, select)
-        best = float("-inf")
-        for idx in candidates:
-            if time.monotonic() >= self._deadline or self._nodes >= self.max_nodes:
-                break
-            try:
-                child = eng.search_step(ss.searchId, [idx])
-            except Exception:
-                continue
-            self._nodes += 1
-            v = self._plan(eng, child, me, depth - 1)
-            if v > best:
-                best = v
-        if best == float("-inf"):
-            return self._eval(state, me)
-        return best
+            self.N[key] = self.N.get(key, 0) + 1
+            self.Q[key] = self.Q.get(key, 0.0) + value
 
+            return value
+
+        priors = self._policy_prior(node, select, key)
+
+        best_action = None
+        best_score = -float("inf")
+
+        for idx, prior in priors.items():
+            child_key = (key, idx)
+
+            score = self._ucb_score(
+                key,
+                child_key,
+                prior,
+            )
+
+            if score > best_score:
+                best_score = score
+                best_action = idx
+
+        if best_action is None:
+            value = self._eval(state, me)
+
+            self.N[key] = self.N.get(key, 0) + 1
+            self.Q[key] = self.Q.get(key, 0.0) + value
+
+            return value
+
+        try:
+            nxt = eng.search_step(
+                ss.searchId,
+                [best_action],
+            )
+        except Exception:
+            value = self._eval(state, me)
+
+            self.N[key] = self.N.get(key, 0) + 1
+            self.Q[key] = self.Q.get(key, 0.0) + value
+
+            return value
+
+        self._nodes += 1
+
+        # -------- Dynamic depth extension --------
+
+        next_depth = depth - 1
+
+        remaining = (
+            self._deadline - time.monotonic()
+        )
+
+        if (
+            len(select.options) <= 3
+            and remaining > 0.25
+            and depth < self.max_depth + 2
+        ):
+            next_depth = depth
+
+        value = self._plan(
+            eng,
+            nxt,
+            me,
+            next_depth,
+        )
+
+        self.N[key] = self.N.get(key, 0) + 1
+        self.Q[key] = self.Q.get(key, 0.0) + value
+
+        child_key = (key, best_action)
+
+        self.N[child_key] = self.N.get(child_key, 0) + 1
+        self.Q[child_key] = self.Q.get(child_key, 0.0) + value
+
+        return value
+    
     def _drive_to_my_turn(self, eng, ss, me) -> float:
         """Drive every decision with the rule policy until it is our next MAIN
         turn, the game ends, or the budget is exhausted; evaluate there.
@@ -393,167 +769,111 @@ class TurnPlanner:
         OptionType.DISCARD: 1,
         OptionType.END: 0,
     }
+    
+    
+    def _adaptive_beam_width(self, select) -> int:
+        n = len(select.options)
+        if n <= 4:
+            return n
+        if n <= 8:
+            return min(6, n)
+        if n <= 15:
+            return min(8, n)
+        return min(10, n)
 
-    def _candidate_main_options(self, node, select: Select) -> list[int]:
-        """Ordered, de-duplicated beam of MAIN option indices to explore.
+    # ========================= CHANGE 5 =========================
+    # Replace _candidate_main_options()
+    # ===========================================================
 
-        Always includes the rule policy's own pick first (so the planner can
-        never do worse than evaluating the greedy line), then the highest-
-        priority distinct options up to ``beam_width``.
-
-        Boss's Orders / Prime Catcher are injected into the beam when the
-        opponent has any bench Pokémon — regardless of TYPE_PRIORITY — because
-        the gust+attack combo is the primary counter to retreat-heavy decks and
-        PLAY=3 priority would otherwise keep it out of a typical mid-game beam.
+    def _candidate_main_options(self, node, select):
         """
+        Produce the candidate actions that will actually be searched.
+        Unlike the previous implementation, this is no longer purely rule-based.
+        It combines
+            • rule policy
+            • learned priors
+            • historical search value
+            • action diversity
+        before applying the adaptive beam width.
+        """
+        if not select.options:
+            return []
         try:
-            rules_pick = rules._choose_main(node, select, self.gamedata)
+            rules_pick = rules._choose_main(
+                node,
+                select,
+                self.gamedata,
+            )
         except Exception:
-            rules_pick = select.options[0].index
-        ordered = [rules_pick]
-
-        # Detect whether opponent has a bench (gust is worth exploring).
-        state = node.get("current") if isinstance(node, dict) else None
-        me = state.get("yourIndex", 0) if isinstance(state, dict) else 0
-        players = state.get("players") or [] if isinstance(state, dict) else []
-        opp = players[1 - me] if len(players) > 1 and isinstance(players[1 - me], dict) else {}
-        opp_has_bench = bool(opp.get("bench"))
-
-        # GUST_IDS: Boss's Orders and Prime Catcher — high-value PLAY options
-        # that open the gust+attack line; inject unconditionally when opp has bench.
-        _GUST_IDS = (1182, 1088)
-        if opp_has_bench:
-            hand = (players[me].get("hand") or []) if len(players) > me and isinstance(players[me], dict) else []
-            for opt in select.options:
-                if opt.index in ordered:
-                    continue
-                cid = opt.card_id
-                if cid is None and opt.hand_index is not None and 0 <= opt.hand_index < len(hand):
-                    hc = hand[opt.hand_index]
-                    cid = hc.get("id") if isinstance(hc, dict) else None
-                if cid in _GUST_IDS:
-                    ordered.append(opt.index)
-                    break  # one gust candidate is enough
-
-        rest = sorted(
-            select.options,
-            key=lambda o: self._TYPE_PRIORITY.get(o.type, 0),
-            reverse=True,
+            rules_pick = None
+        priors = self._policy_prior(
+            node,
+            select,
         )
-        for o in rest:
-            if o.index not in ordered:
-                ordered.append(o.index)
-            if len(ordered) >= self.beam_width:
+        scored = []
+        for option in select.options:
+            score = priors.get(option.index, 0.0)
+            if option.index == rules_pick:
+                score += 0.50
+            action_key = ("candidate", option.index)
+            visits = self.N.get(action_key, 0)
+            if visits:
+                score += min(
+                    math.log1p(visits) * 0.15,
+                    0.60,
+                )
+            # encourage diversity
+            if option.type == OptionType.ATTACK:
+                score += 0.20
+            elif option.type == OptionType.ABILITY:
+                score += 0.15
+            elif option.type == OptionType.EVOLVE:
+                score += 0.12
+            scored.append(
+                (
+                    score,
+                    option.index,
+                )
+            )
+        scored.sort(reverse=True)
+        beam = self._adaptive_beam_width(select)
+        ordered = []
+        for _, idx in scored:
+            if idx not in ordered:
+                ordered.append(idx)
+            if len(ordered) >= beam:
                 break
-        return ordered[: self.beam_width]
-
+        return ordered
+    
+    
+    def _extract_features(self, state: dict, me: int):
+        return self.feature_extractor.extract(state, me)
+    
     # --- leaf evaluation --------------------------------------------------
     def _eval(self, state: dict, me: int) -> float:
-        # Learned leaf value (if enabled + loaded). Used as a bounded ADDITIVE
-        # bonus on top of the hand-eval (a tie-breaker), not a replacement —
-        # a full replacement lost the hand-eval's fine-grained within-turn
-        # ordering. Falls through cleanly on any error.
-        vn_bonus = 0.0
-        if self.value_net is not None and _value_net is not None:
-            try:
-                feats = _value_net.extract_features(
-                    state, me, self.gamedata, _HELPERS
-                )
-                p = self.value_net.predict(feats)
-                vn_bonus = self._vn_scale * (p - 0.5)
-            except Exception:
-                vn_bonus = 0.0
-        gd = self.gamedata
-        ev = self.eval
-        players = state.get("players") or []
-        if len(players) < 2:
-            return 0.0
-        mp = players[me] if isinstance(players[me], dict) else {}
-        op = players[1 - me] if isinstance(players[1 - me], dict) else {}
-
-        score = 0.0
-        # Prize race: fewer of OUR prizes still owed = closer to winning.
-        my_left = _prizes_left(mp)
-        opp_left = _prizes_left(op)
-        score += (opp_left - my_left) * ev["prize"]
-
-        my_act = _active(mp)
-        opp_act = _active(op)
-
-        # Damage on the defender + set-up KO potential.
-        if opp_act:
-            maxhp = opp_act.get("maxHp") or 0
-            hp = opp_act.get("hp") or 0
-            if maxhp > 0:
-                score += ((maxhp - hp) / maxhp) * ev["opp_dmg"]
-            if my_act and hp > 0:
-                dmg = _best_affordable_dmg(my_act, opp_act, gd)
-                if dmg >= hp:
-                    score += ev["setup_ko"] * gd.prize_value(opp_act.get("id"))
-
-        # Our active: survivability, readiness, and the threat against it.
-        if my_act:
-            maxhp = my_act.get("maxHp") or 0
-            hp = my_act.get("hp") or 0
-            if maxhp > 0:
-                score += (hp / maxhp) * ev["my_hp"]
-            if _can_attack(my_act, gd):
-                score += ev["my_ready"]
-            if opp_act and hp > 0:
-                othreat = _best_affordable_dmg(opp_act, my_act, gd)
-                if othreat >= hp:
-                    score -= ev["opp_threat"] * gd.prize_value(my_act.get("id"))
-        else:
-            score -= ev["no_active"]
-
-        # Attacker quality: prefer our strongest available attacker in the
-        # Active seat, fully loaded. Nudges the planner to promote/retreat to a
-        # real attacker instead of swinging a weak baby, and to charge an
-        # attacker to its biggest attack instead of firing an under-energised
-        # one. Both terms are bounded and only compare within OUR own board.
-        if my_act:
-            best_pot = 0
-            for p in [my_act] + list(mp.get("bench") or []):
-                if isinstance(p, dict):
-                    best_pot = max(best_pot, gd.best_damage(p.get("id")))
-            act_pot = gd.best_damage(my_act.get("id"))
-            if best_pot > 0:
-                score += (act_pot / best_pot) * ev["active_quality"]
-            if act_pot > 0:
-                aff = _best_affordable_dmg(my_act, opp_act or {}, gd)
-                score += min(aff / act_pot, 1.0) * ev["active_loaded"]
-
-        # Board development and tempo.
-        score += len(mp.get("bench") or []) * ev["bench"]
-        score += _energy_in_play(mp) * ev["energy"]
-        score += int(mp.get("handCount") or 0) * ev["hand"]
-
-        # Powered bench attackers: each bench Pokémon that can already pay for
-        # an attack is worth significantly more than an unpowered one — it can
-        # immediately threaten after a KO, pivot, or gust.
-        for bp in (mp.get("bench") or []):
-            if isinstance(bp, dict) and _can_attack(bp, gd):
-                score += ev["bench_ready"]
-
-        # Bench-awareness: pivot/wall decks retreat wounded Pokémon before KOs,
-        # so the opponent's active always looks "fresh" — but the damage stays on
-        # bench Pokémon. Credit that progress so the planner values spreading
-        # damage and playing Boss's Orders to drag up weakened targets.
-        for bp in (op.get("bench") or []):
-            if not isinstance(bp, dict):
-                continue
-            maxhp = bp.get("maxHp") or 0
-            hp = bp.get("hp") or 0
-            pv = gd.prize_value(bp.get("id"))
-            if maxhp > 0 and hp < maxhp:
-                score += ((maxhp - hp) / maxhp) * pv * ev["opp_bench_dmg"]
-            # Can we KO this bench target now (after gusting it Active)?
-            if my_act and 0 < hp:
-                dmg = _best_affordable_dmg(my_act, bp, gd)
-                if dmg >= hp:
-                    score += ev["bench_setup_ko"] * pv
-
-        return score + vn_bonus
+        """
+        Evaluate a public board state.
+        Results are cached using the public state key so repeated
+        transpositions reuse the same evaluation instead of repeatedly
+        extracting features and invoking the evaluator.
+        """
+        key = self._state_key(state, me)
+        if key is not None:
+            cached = self.transposition.get(key)
+            if cached is not None:
+                return cached
+        features = self.feature_extractor.extract(state, me)
+        result = self.evaluator.evaluate(features)
+        if self.previous_features is not None:
+            self.evaluator.temporal_difference_update(
+                self.previous_features,
+                features,
+                reward=result.score,
+            )
+        self.previous_features = features.copy()
+        if key is not None:
+            self.transposition[key] = result.score
+        return result.score
 
     # --- determinization --------------------------------------------------
     def _build_determinizations(self, obs_dict, state, me) -> list[tuple]:
@@ -563,29 +883,29 @@ class TurnPlanner:
             return []
         mp = players[me] if isinstance(players[me], dict) else {}
         op = players[1 - me] if isinstance(players[1 - me], dict) else {}
-
+        
         sel = obs_dict.get("select") if isinstance(obs_dict, dict) else None
         deck_given = isinstance(sel, dict) and sel.get("deck") is not None
-
+        
         my_deck_n = int(mp.get("deckCount") or 0)
         my_prize_n = len(mp.get("prize") or [])
         opp_deck_n = int(op.get("deckCount") or 0)
         opp_prize_n = len(op.get("prize") or [])
         opp_hand_n = int(op.get("handCount") or 0)
-
+        
         # Our own unseen pool = decklist minus everything we can see.
         unseen = Counter(self.your_deck_ids)
         for cid in _visible_ids(mp):
             if unseen.get(cid, 0) > 0:
                 unseen[cid] -= 1
         my_pool_base = list(unseen.elements())
-
+        
         # Opponent facedown active (if any) must be a Basic Pokemon id.
         opp_active_needed = False
         oa = op.get("active") or []
         if oa and oa[0] is None:
             opp_active_needed = True
-
+            
         fb = self.your_deck_ids[0] if self.your_deck_ids else 0
         dets: list[tuple] = []
         for _ in range(self.k):
@@ -613,7 +933,7 @@ class TurnPlanner:
                 if cid is None:
                     continue
                 opp_active = [cid]
-
+                
             if your_prize is None or opp_deck is None or opp_prize is None or opp_hand is None:
                 continue
             dets.append((your_deck, your_prize, opp_deck, opp_prize, opp_hand, opp_active))
@@ -624,7 +944,7 @@ class TurnPlanner:
             if self.gamedata.is_basic_pokemon(cid):
                 return cid
         return None
-
+    
 
 # --- module helpers -------------------------------------------------------
 def _as_obs_dict(ss):
@@ -636,7 +956,7 @@ def _as_obs_dict(ss):
         return dataclasses.asdict(obs)
     except Exception:
         return None
-
+    
 
 def _active(player: dict) -> dict | None:
     arr = player.get("active") or []

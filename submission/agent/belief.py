@@ -19,6 +19,7 @@ from __future__ import annotations
 import random
 from collections import Counter
 from dataclasses import dataclass, field
+import math
 
 
 @dataclass
@@ -50,7 +51,10 @@ class BeliefState:
 
     candidates: list[CandidateDeck]
     observed: Counter = field(default_factory=Counter)
+    action_stats: Counter = field(default_factory=Counter)
+    turn_number: int = 0
     _log_weights: list[float] = field(default_factory=list)
+    behavior: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self._log_weights:
@@ -58,35 +62,98 @@ class BeliefState:
             self._log_weights = [
                 _safe_log(c.prior / total) for c in self.candidates
             ]
+    
+    def observe_action(self,action_type:str):
+        self.action_stats[action_type]+=1
+        self.turn_number+=1
+        total=max(1,self.turn_number)
+        self.behavior["attack_rate"]=self.action_stats["attack"]/total
+        self.behavior["ability_rate"]=self.action_stats["ability"]/total
+        self.behavior["item_rate"]=self.action_stats["item"]/total
+        self.behavior["supporter_rate"]=self.action_stats["supporter"]/total
+        self.behavior["retreat_rate"]=self.action_stats["retreat"]/total
+        self.behavior["evolve_rate"]=self.action_stats["evolve"]/total
+        
+    def opponent_embedding(self):
+        return (
+            self.behavior.get("attack_rate",0.0),
+            self.behavior.get("ability_rate",0.0),
+            self.behavior.get("item_rate",0.0),
+            self.behavior.get("supporter_rate",0.0),
+            self.behavior.get("retreat_rate",0.0),
+            self.behavior.get("evolve_rate",0.0),
+            self.confidence(),
+            self.entropy(),
+        )
+            
+    def observe_multiple(self,card_ids:list[int])->None:
+        for cid in card_ids:
+            self.observe(cid)
+            
+    def observe_turn(self,played:list[int],discarded:list[int],active:int|None=None,actions:list[str]|None=None):
+        if active is not None:
+            self.observe(active)
+        for cid in played:
+            self.observe(cid)
+        for cid in discarded:
+            self.observe(cid)
+        if actions:
+            for action in actions:
+                self.observe_action(action)
+            
+    def confidence(self)->float:
+        post=self.posterior()
+        if not post:
+            return 0.0
+        return max(post)
+    
+    def entropy(self)->float:
+        post=self.posterior()
+        h=0.0
+        for p in post:
+            if p>0:
+                h-=p*math.log(p)
+        return h
 
     # --- updating ---------------------------------------------------------
-    def observe(self, card_id: int) -> None:
-        """Register that the opponent revealed ``card_id`` (played/discarded)."""
-        self.observed[card_id] += 1
-        for i, cand in enumerate(self.candidates):
-            # A deck is impossible if it cannot contain this many copies.
-            if cand.counts.get(card_id, 0) < self.observed[card_id]:
-                self._log_weights[i] = float("-inf")
+    def observe(self,card_id:int)->None:
+        self.observed[card_id]+=1
+        for i,cand in enumerate(self.candidates):
+            copies=cand.counts.get(card_id,0)
+            seen=self.observed[card_id]
+            if copies<seen:
+                self._log_weights[i]=float("-inf")
+                continue
+            likelihood=(copies-seen+1)/(copies+1)
+            self._log_weights[i]+=math.log(max(likelihood,1e-9))
 
-    def posterior(self) -> list[float]:
-        """Normalized probability over candidate decks (consistent ones only)."""
-        m = max(self._log_weights) if self._log_weights else 0.0
-        if m == float("-inf"):
-            # All candidates ruled out — fall back to uniform.
-            n = len(self.candidates)
-            return [1.0 / n] * n if n else []
-        exps = [
-            (0.0 if w == float("-inf") else pow(2.718281828, w - m))
-            for w in self._log_weights
-        ]
-        s = sum(exps) or 1.0
-        return [e / s for e in exps]
+    def posterior(self)->list[float]:
+        if not self._log_weights:
+            return []
+        m=max(self._log_weights)
+        if m==float("-inf"):
+            n=len(self.candidates)
+            return [1.0/n]*n if n else []
+        probs=[0.0]*len(self._log_weights)
+        total=0.0
+        for i,w in enumerate(self._log_weights):
+            if w==float("-inf"):
+                continue
+            probs[i]=math.exp(w-m)
+            total+=probs[i]
+        if total==0:
+            n=len(self.candidates)
+            return [1.0/n]*n if n else []
+        return [p/total for p in probs]
 
-    def most_likely(self) -> CandidateDeck | None:
-        post = self.posterior()
+    def most_likely(self)->CandidateDeck|None:
+        post=self.posterior()
         if not post:
             return None
-        return self.candidates[max(range(len(post)), key=post.__getitem__)]
+        idx=max(range(len(post)),key=post.__getitem__)
+        if post[idx]<0.55:
+            return None
+        return self.candidates[idx]
 
     # --- sampling ---------------------------------------------------------
     def sample_determinizations(
