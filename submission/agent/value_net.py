@@ -138,17 +138,18 @@ class ValueNet:
     def __init__(
         self,
         path=None,
-        weight_generator=None,
     ):
         self.available = False
         self.kind = None
+        # Logistic model
         self._w = None
+        # MLP model
         self._W1 = None
         self._b1 = None
         self._W2 = None
         self._b2 = None
-        # ---- fallback evaluator ----
-        self.weight_generator = weight_generator
+        # Online calibration bias
+        self.bias = 0.0
         if path is None:
             path = os.path.join(
                 os.path.dirname(__file__),
@@ -157,7 +158,10 @@ class ValueNet:
         if np is None or not os.path.exists(path):
             return
         try:
-            d = np.load(path, allow_pickle=False)
+            d = np.load(
+                path,
+                allow_pickle=False,
+            )
             kind = (
                 str(d["kind"])
                 if "kind" in d
@@ -187,7 +191,7 @@ class ValueNet:
                 ).ravel()
                 self._b2 = float(
                     np.asarray(
-                        d["b2"]
+                        d["b2"],
                     ).ravel()[0]
                 )
                 if self._W1.shape[0] != N_FEATURES:
@@ -228,21 +232,17 @@ class ValueNet:
         return e / (1.0 + e)
 
     # -------------------------------------------------------------
-    def predict(self, feats):
+    def predict(
+        self,
+        feats,
+    ):
         """
-        Returns win probability.
-        If no trained model exists,
-        fall back to the handcrafted evaluator.
+        Returns the estimated probability of eventually winning.
+        If no trained model is available, return a neutral estimate.
+        The planner is responsible for invoking the heuristic fallback.
         """
         if not self.available:
-            if self.weight_generator is None:
-                return 0.5
-            result = self.weight_generator.evaluate(feats)
-            score = result.score
-            return 1.0 / (
-                1.0 +
-                math.exp(-score / 100.0)
-            )
+            return 0.5
         x = np.asarray(
             feats,
             dtype=np.float64,
@@ -258,6 +258,8 @@ class ValueNet:
             z = float(
                 h @ self._W2 + self._b2
             )
+        # Online calibration bias
+        z += self.bias
         if z >= 0:
             return 1.0 / (
                 1.0 +

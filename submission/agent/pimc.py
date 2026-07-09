@@ -29,6 +29,7 @@ from .evaluation import (
     PlannerFeatureExtractor,
     WeightGenerator,
     Evaluator,
+    DynamicWeightGenerator,
     EvaluationContext,
 )
 from . import rules
@@ -79,7 +80,7 @@ class PIMCSearcher:
         self.feature_extractor = PlannerFeatureExtractor(
             self.gamedata,
         )
-        self.weight_generator = WeightGenerator()
+        self.weight_generator = DynamicWeightGenerator()
         self.evaluator = Evaluator(
             self.weight_generator,
         )

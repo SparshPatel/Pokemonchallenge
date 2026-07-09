@@ -137,3 +137,103 @@ def your_index(obs_dict) -> int:
     state = current_state(obs_dict)
     yi = _get(state, "yourIndex")
     return int(yi) if isinstance(yi, int) else 0
+
+# ============================================================================
+# Unified State Access Helpers
+# ============================================================================
+def player(state: dict | None, index: int) -> dict:
+    """Safely return a player dictionary."""
+    if not isinstance(state, dict):
+        return {}
+    players = state.get("players") or []
+    if (
+        isinstance(players, list)
+        and 0 <= index < len(players)
+        and isinstance(players[index], dict)
+    ):
+        return players[index]
+    return {}
+
+def opponent_index(index: int) -> int:
+    """Return opponent index."""
+    return 1 - index
+
+def active(state: dict | None, index: int) ->dict | None:
+    """Return active Pokémon dictionary."""
+    p = player(state, index)
+    active_list = p.get("active") or []
+    if (
+        isinstance(active_list, list)
+        and active_list
+        and isinstance(active_list[0], dict)
+    ):
+        return active_list[0]
+    return None
+
+def bench(state: dict | None, index: int) -> list:
+    """Return bench list."""
+    p = player(state, index)
+    b = p.get("bench")
+    return b if isinstance(b, list) else []
+
+def hand(state: dict | None, index: int) -> list:
+    """Return hand list."""
+    p = player(state, index)
+    h = p.get("hand")
+    return h if isinstance(h, list) else []
+
+def discard(state: dict | None, index: int) -> list:
+    """Return discard pile."""
+    p = player(state, index)
+    d = p.get("discard")
+    return d if isinstance(d, list) else []
+
+def prizes(state: dict | None, index: int) -> list:
+    """Return prize cards."""
+    p = player(state, index)
+    pr = p.get("prize")
+    return pr if isinstance(pr, list) else []
+
+def card_id(pokemon: dict | None) -> int | None:
+    """Return Pokémon card id."""
+    if not isinstance(pokemon, dict):
+        return None
+    cid = pokemon.get("id")
+    return cid if isinstance(cid, int) else None
+
+def hp(pokemon: dict | None) -> int:
+    """Return current HP."""
+    if not isinstance(pokemon, dict):
+        return 0
+    value = pokemon.get("hp")
+    return int(value) if isinstance(value, (int, float)) else 0
+
+def max_hp(pokemon: dict | None) -> int:
+    """Return maximum HP."""
+    if not isinstance(pokemon, dict):
+        return 0
+    value = pokemon.get("maxHp")
+    return int(value) if isinstance(value, (int, float)) else 0
+
+def energies(pokemon: dict | None) -> list:
+    """Return attached energies."""
+    if not isinstance(pokemon, dict):
+        return []
+    e = pokemon.get("energies")
+    return e if isinstance(e, list) else []
+
+def active_card_id(state: dict | None, index: int) -> int | None:
+    """Return active Pokémon card id."""
+    return card_id(active(state, index))
+
+def active_hp(state: dict | None, index: int) -> int:
+    """Return active Pokémon HP."""
+    return hp(active(state, index))
+
+def bench_slots(state: dict | None, index: int) -> int:
+    """Return remaining bench capacity."""
+    p = player(state, index)
+    bench_max = p.get("benchMax")
+    if not isinstance(bench_max, int):
+        bench_max = 5
+    return max(0, bench_max - len(bench(state, index)))

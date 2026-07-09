@@ -15,7 +15,21 @@ Every accessor is defensive; missing fields degrade to a safe, legal choice.
 from __future__ import annotations
 import json
 import os
-from .adapter import Option, Select
+from .adapter import (
+    Option,
+    Select,
+    player,
+    opponent_index,
+    active,
+    bench,
+    hand,
+    card_id,
+    hp,
+    active_card_id,
+    active_hp,
+    bench_slots,
+    energies,
+)
 from .enums import AreaType, OptionType, SelectContext, SelectType
 from .gamedata import GameData
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -189,6 +203,7 @@ def _choose_main(obs_dict, select: Select, gd: GameData) -> int:
         if s > best_score:
             best_score, best_idx = s, opt.index
     return best_idx
+
 def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
     t = opt.type
     w = WEIGHTS
@@ -409,6 +424,7 @@ def _choose_cards(obs_dict, select: Select, gd: GameData) -> list[int]:
     k = (select.max_count or select.min_count) if acquire else select.min_count
     k = max(select.min_count, min(k, n))
     return sorted(idx for _, idx in scored[:k])
+
 def _card_value(cid, gd: GameData) -> float:
     if cid is None:
         return 1.0
@@ -449,10 +465,12 @@ def _choose_yes_no(select: Select) -> int:
         if opt.type == OptionType.YES:
             return opt.index
     return select.options[0].index
+
 def _choose_lowest(select: Select) -> list[int]:
     k = max(select.min_count, 1)
     k = min(k, select.max_count or k, len(select.options))
     return list(range(k))
+
 def _fallback(select: Select) -> list[int]:
     n = len(select.options)
     k = max(0, min(select.min_count, n))
@@ -463,13 +481,9 @@ def _fallback(select: Select) -> list[int]:
 # ---------------------------------------------------------------------------
 # State helpers
 # ---------------------------------------------------------------------------
-def _player(state, yi) -> dict:
-    if not isinstance(state, dict):
-        return {}
-    players = state.get("players") or []
-    if 0 <= yi < len(players) and isinstance(players[yi], dict):
-        return players[yi]
-    return {}
+def _player(state, yi):
+    return player(state, yi)
+
 def _attach_target(opt: Option, me: dict) -> dict | None:
     """Resolve the Pokémon an ATTACH option targets (Active or a Bench slot)."""
     idx = opt.in_play_index
@@ -484,14 +498,12 @@ def _attach_target(opt: Option, me: dict) -> dict | None:
 # ---------------------------------------------------------------------------
 # Threat model / board reading (for the danger-aware features)
 # ---------------------------------------------------------------------------
-def _active_pokemon(state, pi) -> dict | None:
-    active = _player(state, pi).get("active") or []
-    if active and isinstance(active[0], dict):
-        return active[0]
-    return None
-def _active_card_id(state, pi) -> int | None:
-    pkmn = _active_pokemon(state, pi)
-    return pkmn.get("id") if isinstance(pkmn, dict) else None
+def _active_pokemon(state, pi):
+    return active(state, pi)
+
+def _active_card_id(state, pi):
+    return active_card_id(state, pi)
+
 def _best_affordable_damage(pkmn: dict | None, gd: GameData, defender: dict | None = None) -> int:
     """Highest damage among the attacks ``pkmn`` can currently pay for.
     When ``defender`` is given, damage is Weakness/Resistance-adjusted for that
@@ -512,6 +524,7 @@ def _best_affordable_damage(pkmn: dict | None, gd: GameData, defender: dict | No
                 dmg = gd.effective_damage(cid, dmg, def_id)
             best = max(best, dmg)
     return best
+
 def _in_danger(state, yi, gd: GameData) -> bool:
     """True if the opponent's Active can KO our Active on its next turn."""
     mine = _active_pokemon(state, yi)
@@ -524,16 +537,17 @@ def _in_danger(state, yi, gd: GameData) -> bool:
     # Weakness cuts both ways: account for *our* Active's Weakness to the
     # opponent's type when judging whether we are about to be KO'd.
     return _best_affordable_damage(opp, gd, defender=mine) >= my_hp
+
 def _has_bench_attacker(state, yi, gd: GameData) -> bool:
     """True if a healthy Benched Pokémon could take over as attacker."""
     for p in _player(state, yi).get("bench") or []:
         if isinstance(p, dict) and (p.get("hp") or 0) > 0 and gd.best_damage(p.get("id")) > 0:
             return True
     return False
-def _bench_empty_slots(state, yi) -> int:
-    me = _player(state, yi)
-    bench = me.get("bench") or []
-    return max(0, int(me.get("benchMax") or 5) - len(bench))
+
+def _bench_empty_slots(state, yi):
+    return bench_slots(state, yi)
+
 def _completes_attack(pkmn: dict, gd: GameData) -> bool:
     """True if one more Energy likely finishes the Pokémon's cheapest attack."""
     cid = pkmn.get("id")
@@ -546,6 +560,7 @@ def _completes_attack(pkmn: dict, gd: GameData) -> bool:
     if gd.can_pay(cheapest, attached):
         return False  # already able to attack
     return len(attached) + 1 >= len(cheapest)
+
 def _option_pokemon(opt: Option, state, default_pi: int) -> dict | None:
     """Resolve the board Pokémon an option references (active or bench)."""
     pi = opt.player_index if opt.player_index is not None else default_pi
@@ -558,6 +573,7 @@ def _option_pokemon(opt: Option, state, default_pi: int) -> dict | None:
     if 0 <= idx < len(arr) and isinstance(arr[idx], dict):
         return arr[idx]
     return None
+
 def _choose_gust_target(select: Select, state, yi, gd: GameData) -> list[int]:
     """Pick the best opponent Pokémon to drag up (Boss's Orders / gust)."""
     opp = 1 - yi
@@ -571,6 +587,7 @@ def _choose_gust_target(select: Select, state, yi, gd: GameData) -> list[int]:
     k = max(select.min_count, 1)
     k = min(k, select.max_count or k, n)
     return sorted(idx for _, idx in scored[:k])
+
 def _gust_value(target: dict | None, my_active: dict | None, gd: GameData) -> float:
     if not isinstance(target, dict):
         return 0.0
@@ -588,38 +605,21 @@ def _gust_value(target: dict | None, my_active: dict | None, gd: GameData) -> fl
     if gd.is_ex(cid):
         v += WEIGHTS["gust_ex"]   # ex = 2 Prizes
     return v
-def _hand(state, yi) -> list:
-    if not isinstance(state, dict):
-        return []
-    players = state.get("players") or []
-    if yi < len(players) and isinstance(players[yi], dict):
-        return players[yi].get("hand") or []
-    return []
+
+def _hand(state, yi):
+    return hand(state, yi)
+
 def _card_at(hand, idx):
     if idx is None or not isinstance(hand, list) or not (0 <= idx < len(hand)):
         return None
     entry = hand[idx]
     return entry.get("id") if isinstance(entry, dict) else None
+
 def _opponent_active_hp(state, yi):
-    if not isinstance(state, dict):
-        return None
-    players = state.get("players") or []
-    oi = 1 - yi
-    if oi >= len(players) or not isinstance(players[oi], dict):
-        return None
-    active = players[oi].get("active") or []
-    if not active or not isinstance(active[0], dict):
-        return None
-    return active[0].get("hp")
-def _bench_has_room(state, yi) -> bool:
-    if not isinstance(state, dict):
-        return True
-    players = state.get("players") or []
-    if yi >= len(players) or not isinstance(players[yi], dict):
-        return True
-    me = players[yi]
-    bench = me.get("bench") or []
-    return len(bench) < int(me.get("benchMax") or 5)
+    return active_hp(state, opponent_index(yi))
+
+def _bench_has_room(state, yi):
+    return bench_slots(state, yi) > 0
 
 _AREA_FIELD = {
     AreaType.HAND: "hand",
@@ -651,6 +651,7 @@ def _resolve_card_id(opt: Option, obs_dict, select: Select, state, yi):
     if not (0 <= idx < len(arr)) or not isinstance(arr[idx], dict):
         return None
     return arr[idx].get("id")
+
 def _can_attack(pkmn: dict, gd: GameData) -> bool:
     cid = pkmn.get("id")
     if cid is None:
@@ -660,6 +661,7 @@ def _can_attack(pkmn: dict, gd: GameData) -> bool:
         if gd.can_pay(gd.attack_cost(aid), attached):
             return True
     return False
+
 def _powered_switch_value(pkmn: dict, gd: GameData) -> float:
     hp = pkmn.get("hp") or 0
     cid = pkmn.get("id")

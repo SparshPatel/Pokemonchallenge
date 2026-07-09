@@ -77,6 +77,7 @@ class TreeNode:
     Statistics stored for one MCTS node.
     """
     visits: int = 0
+    virtual_visits: int = 0
     value_sum: float = 0.0
     priors: dict[int, float] = field(default_factory=dict)
     children: dict[int, int] = field(default_factory=dict)
@@ -358,52 +359,58 @@ class TurnPlanner:
             values[action] = child.value
         return values
 
-    def _state_key(self, state: dict, me: int):
+    def _state_key(
+        self,
+        state: dict,
+        me: int,
+    ):
         """
-        Produce a deterministic hashable representation of the public board state.
-        Hidden information (deck contents, hand identities, prizes, etc.) is
-        deliberately ignored so that equivalent public positions share the same
-        transposition entry.
+        Hashable public representation of a board state.
+        Hidden information is ignored, but every public resource that
+        influences legal actions or evaluation is preserved so search
+        transpositions remain correct.
         """
-        players = state.get("players") or []
-        if len(players) < 2:
+        players = state.get("players")
+        if not isinstance(players, list) or len(players) < 2:
             return None
-        mp = players[me] if isinstance(players[me], dict) else {}
-        op = players[1 - me] if isinstance(players[1 - me], dict) else {}
+        def encode_pokemon(mon):
+            if not isinstance(mon, dict):
+                return None
+            return (
+                mon.get("id"),
+                mon.get("hp"),
+                len(mon.get("energies") or []),
+                tuple(sorted(mon.get("tools") or [])),
+                tuple(sorted(mon.get("specialConditions") or [])),
+                mon.get("damage", 0),
+            )
         def encode_player(player):
-            active = _active(player)
-            if active is None:
-                active_repr = None
-            else:
-                active_repr = (
-                    active.get("id"),
-                    active.get("hp"),
-                    len(active.get("energies") or []),
+            active = encode_pokemon(
+                _active(player)
+            )
+            bench = tuple(
+                sorted(
+                    encode_pokemon(b)
+                    for b in (player.get("bench") or [])
+                    if isinstance(b, dict)
                 )
-            bench = []
-            for mon in player.get("bench") or []:
-                if not isinstance(mon, dict):
-                    continue
-                bench.append(
-                    (
-                        mon.get("id"),
-                        mon.get("hp"),
-                        len(mon.get("energies") or []),
-                    )
-                )
-            bench.sort()
+            )
             return (
                 _prizes_left(player),
                 player.get("handCount", 0),
-                active_repr,
-                tuple(bench),
+                player.get("deckCount", 0),
+                player.get("discardCount", len(player.get("discard") or [])),
+                player.get("supporterPlayed", False),
+                active,
+                bench,
                 _energy_in_play(player),
             )
         return (
-            encode_player(mp),
-            encode_player(op),
+            encode_player(players[me]),
+            encode_player(players[1 - me]),
             state.get("turn", 0),
             state.get("turnPlayer", me),
+            state.get("stadium"),
         )
         
     def _node(
@@ -424,6 +431,29 @@ class TurnPlanner:
             node = self._node(sid)
             node.visits += 1
             node.value_sum += value
+            
+    def _apply_virtual_loss(
+        self,
+        path,
+    ):
+        """
+        Reserve this path while a simulation is traversing it.
+        """
+        for sid in path:
+            node = self._node(sid)
+            node.virtual_visits += 1
+
+    def _revert_virtual_loss(
+        self,
+        path,
+    ):
+        """
+        Undo the temporary virtual visit counts.
+        """
+        for sid in path:
+            node = self._node(sid)
+            if node.virtual_visits:
+                node.virtual_visits -= 1
 
     def _expand_node(
         self,
@@ -449,11 +479,19 @@ class TurnPlanner:
     ):
         parent = self._node(parent_id)
         child = self._node(child_id)
+        parent_visits = (
+            parent.visits
+            + parent.virtual_visits
+        )
+        child_visits = (
+            child.visits
+            + child.virtual_visits
+        )
         exploration = (
             self.cpuct
             * prior
-            * math.sqrt(parent.visits + 1)
-            / (1 + child.visits)
+            * math.sqrt(parent_visits + 1)
+            / (1 + child_visits)
         )
         return child.value + exploration
     
@@ -524,6 +562,27 @@ class TurnPlanner:
             k: v / total
             for k, v in scores.items()
         }
+        
+    def _progressive_width(
+        self,
+        search_id,
+        max_children,
+    ):
+        """
+        Progressive widening.
+        The number of children allowed to exist grows with the number
+        of visits to the node.
+        width = min_pw + visits^alpha
+        """
+        node = self._node(search_id)
+        width = int(
+            self.min_pw
+            + (node.visits ** self.pw_alpha)
+        )
+        return min(
+            width,
+            max_children,
+        )
     
     def _policy_prior(
         self,
@@ -531,6 +590,11 @@ class TurnPlanner:
         select,
         search_id=None,
     ):
+        """
+        Compute policy priors for every legal action.
+        Progressive widening is handled during expansion rather than by
+        discarding actions here.
+        """
         try:
             rules_pick = rules._choose_main(
                 node,
@@ -541,32 +605,12 @@ class TurnPlanner:
             rules_pick = None
         scores = {}
         for option in select.options:
-            scores[
-                option.index
-            ] = self._score_option(
+            scores[option.index] = self._score_option(
                 option,
                 rules_pick,
                 search_id,
             )
-        if (
-            search_id is not None
-            and search_id in self.ctx.tree
-        ):
-            width = self._progressive_width(
-                search_id,
-                len(scores),
-            )
-            ordered = sorted(
-                scores.items(),
-                key=lambda x: x[1],
-                reverse=True,
-            )
-            scores = dict(
-                ordered[:width]
-            )
-        return self._normalize_priors(
-            scores
-        )
+        return self._normalize_priors(scores)
      
     # ========================= CHANGE 4 =========================
     # Replace _plan() completely
@@ -605,19 +649,42 @@ class TurnPlanner:
         state,
         me,
     ):
+        """
+        Handle opponent decisions.
+        If opponent search is enabled, perform a shallow search for the
+        opponent rather than blindly following the rule policy.
+        """
         acting = state.get("yourIndex", me)
         if acting == me:
             return None
-        if self.opp_response:
+        if not self.opp_response:
+            return self._eval(state, me)
+        node = _as_obs_dict(ss)
+        if node is None:
+            return self._eval(state, me)
+        select = extract_select(node)
+        if (
+            select is None
+            or not select.options
+        ):
+            return self._eval(state, me)
+        if select.select_type != SelectType.MAIN:
             return self._drive_to_my_turn(
                 eng,
                 ss,
                 me,
             )
-        return self._eval(
+        value = self._expand_search_node(
+            eng,
+            ss,
+            node,
             state,
-            me,
+            select,
+            1 - me,
+            2,
+            [ss.searchId],
         )
+        return -value
         
     def _handle_forced_selection(
         self,
@@ -695,6 +762,31 @@ class TurnPlanner:
                 best_action = action
         return best_action
     
+    def _select_child(
+        self,
+        search_id,
+    ):
+        """
+        Select the already-expanded child with the highest PUCT score.
+        Returns (action, child_id).
+        """
+        node = self._node(search_id)
+        best_action = None
+        best_child = None
+        best_score = -float("inf")
+        for action, child_id in node.children.items():
+            prior = node.priors[action]
+            score = self._ucb_score(
+                search_id,
+                child_id,
+                prior,
+            )
+            if score > best_score:
+                best_score = score
+                best_action = action
+                best_child = child_id
+        return best_action, best_child
+    
     def _step_child(
         self,
         eng,
@@ -726,7 +818,7 @@ class TurnPlanner:
         path,
     ):
         """
-        Expand one search node and recurse.
+        Expand a search node using progressive widening and PUCT.
         """
         self._expand_node(
             ss.searchId,
@@ -734,42 +826,70 @@ class TurnPlanner:
             select,
         )
         node_stats = self._node(ss.searchId)
-        best_action = self._select_best_action(
-            ss.searchId
+        allowed_width = self._progressive_width(
+            ss.searchId,
+            len(node_stats.priors),
+        )
+        # Expand unexplored children first
+        ordered_actions = sorted(
+            node_stats.priors.items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        for action, _ in ordered_actions:
+            if len(node_stats.children) >= allowed_width:
+                break
+            if action not in node_stats.children:
+                nxt = self._step_child(
+                    eng,
+                    ss,
+                    action,
+                )
+                if nxt is None:
+                   continue
+                child_id = nxt.searchId
+                node_stats.children[action] = child_id
+                child_node = _as_obs_dict(nxt)
+                if child_node is not None:
+                    child_select = extract_select(child_node)
+                    if child_select is not None:
+                        self._expand_node(
+                            child_id,
+                            child_node,
+                            child_select,
+                        )
+                return self._plan(
+                    eng,
+                    nxt,
+                    me,
+                    depth - 1,
+                    path + [child_id],
+                )
+        # Otherwise descend into the best existing child.
+        best_action, _ = self._select_child(
+            ss.searchId,
         )
         if best_action is None:
-            return self._eval(state, me)
+            return self._eval(
+                state,
+                me,
+            )
         nxt = self._step_child(
             eng,
             ss,
             best_action,
         )
         if nxt is None:
-            return self._eval(state, me)
-        child_id = nxt.searchId
-        node_stats.children[best_action] = child_id
-        child_path = path + [child_id]
-        child_node = _as_obs_dict(nxt)
-        if child_node is not None:
-            child_select = extract_select(child_node)
-            if child_select is not None:
-                self._expand_node(
-                    child_id,
-                    child_node,
-                    child_select,
-                )
-        next_depth = depth - 1
-        if (
-            len(select.options) <= 3
-            and time.monotonic() + 0.25 < self.ctx.deadline
-        ):
-            next_depth = depth
+            return self._eval(
+                state,
+                me,
+            )
         return self._plan(
             eng,
             nxt,
             me,
-            next_depth,
-            child_path,
+            depth - 1,
+            path + [nxt.searchId],
         )
     
     def _plan(
@@ -792,6 +912,7 @@ class TurnPlanner:
         cached = self.ctx.cache.search.get(
             (key, depth)
         )
+        
         if cached is not None:
             self._backup(path, cached)
             return cached
@@ -853,16 +974,23 @@ class TurnPlanner:
         # --------------------------------------------------
         # Expand node
         # --------------------------------------------------
-        value = self._expand_search_node(
-            eng,
-            ss,
-            node,
-            state,
-            select,
-            me,
-            depth,
-            path,
-        )
+        # --------------------------------------------------
+        # Expand node
+        # --------------------------------------------------
+        self._apply_virtual_loss(path)
+        try:
+            value = self._expand_search_node(
+                eng,
+                ss,
+                node,
+                state,
+                select,
+                me,
+                depth,
+                path,
+            )
+        finally:
+            self._revert_virtual_loss(path)
         self.ctx.cache.search[
             (key, depth)
         ] = value

@@ -68,53 +68,112 @@ class GameData:
         return gd
 
     def _load_from_engine(self) -> None:
+        """
+        Load metadata from cg.api when available.
+        If cg.api cannot be imported (offline testing, unit tests, future engine
+        changes), fall back to cards.json so the rest of the agent still has
+        Pokémon/Trainer metadata instead of an empty database.
+        """
         try:
             from cg import api  # type: ignore
+            self._load_engine(api)
+            self.ok = True
+            return
         except Exception:
+            pass
+        self._load_cards_json()
+        
+    def _load_engine(self, api) -> None:
+        """
+        Original cg.api loader.
+        Kept separate so the loader can fall back to cards.json when cg.api is
+        unavailable.
+        """
+        for a in api.all_attack():
+            text = (getattr(a, "text", "") or "").lower()
+            bonus = 0
+            if "burned" in text:
+                bonus += _BURN_RESIDUAL
+            if "poisoned" in text:
+                bonus += _POISON_RESIDUAL
+            self.attacks[a.attackId] = _Attack(
+                a.attackId,
+                a.name,
+                int(a.damage or 0),
+                [int(e) for e in (a.energies or [])],
+                bonus,
+            )
+        for c in api.all_card_data():
+            cid = c.cardId
+            self.card_type[cid] = int(c.cardType)
+            self.card_name[cid] = c.name
+            self.card_attacks[cid] = [
+                int(a)
+                for a in (c.attacks or [])
+            ]
+            if getattr(c, "weakness", None) is not None:
+                self.card_weakness[cid] = int(c.weakness)
+            if getattr(c, "resistance", None) is not None:
+                self.card_resistance[cid] = int(c.resistance)
+            if getattr(c, "energyType", None) is not None:
+                self.card_energy_type[cid] = int(c.energyType)
+            if getattr(c, "basic", False) and int(c.cardType) == CardType.POKEMON:
+                self.is_basic_pokemon_id.add(cid)
+            if getattr(c, "ex", False) or getattr(c, "megaEx", False):
+                self.is_ex_id.add(cid)
+            if getattr(c, "megaEx", False):
+                self.is_mega_id.add(cid)
+            if int(c.cardType) == CardType.ITEM:
+                name = (c.name or "").lower()
+                if any(k in name for k in _DIG_KEYWORDS):
+                    self.is_dig_item_id.add(cid)
+            dmg = 0
+            for aid in (c.attacks or []):
+                atk = self.attacks.get(aid)
+                if atk:
+                    dmg = max(dmg, atk.damage)
+            self.card_best_damage[cid] = dmg
+            
+    def _load_cards_json(self) -> None:
+        """
+        Lightweight offline fallback.
+        cards.json lacks attack IDs and exact costs, but still provides enough
+        metadata for evaluation, feature extraction and unit tests.
+        """
+        import json
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "cards.json",
+        )
+        path = os.path.abspath(path)
+        if not os.path.exists(path):
             return
         try:
-            for a in api.all_attack():
-                text = (getattr(a, "text", "") or "").lower()
-                bonus = 0
-                if "burned" in text:
-                    bonus += _BURN_RESIDUAL
-                if "poisoned" in text:
-                    bonus += _POISON_RESIDUAL
-                self.attacks[a.attackId] = _Attack(
-                    a.attackId, a.name, int(a.damage or 0),
-                    [int(e) for e in (a.energies or [])], bonus,
-                )
-            for c in api.all_card_data():
-                cid = c.cardId
-                self.card_type[cid] = int(c.cardType)
-                self.card_name[cid] = c.name
-                self.card_attacks[cid] = [int(a) for a in (c.attacks or [])]
-                if getattr(c, "weakness", None) is not None:
-                    self.card_weakness[cid] = int(c.weakness)
-                if getattr(c, "resistance", None) is not None:
-                    self.card_resistance[cid] = int(c.resistance)
-                if getattr(c, "energyType", None) is not None:
-                    self.card_energy_type[cid] = int(c.energyType)
-                if getattr(c, "basic", False) and int(c.cardType) == CardType.POKEMON:
-                    self.is_basic_pokemon_id.add(cid)
-                if getattr(c, "ex", False) or getattr(c, "megaEx", False):
-                    self.is_ex_id.add(cid)
-                if getattr(c, "megaEx", False):
-                    self.is_mega_id.add(cid)
-                if int(c.cardType) == CardType.ITEM:
-                    name = (c.name or "").lower()
-                    if any(k in name for k in _DIG_KEYWORDS):
-                        self.is_dig_item_id.add(cid)
-                dmg = 0
-                for aid in (c.attacks or []):
-                    atk = self.attacks.get(aid)
-                    if atk:
-                        dmg = max(dmg, atk.damage)
-                self.card_best_damage[cid] = dmg
-            self.ok = True
+            with open(path, "r", encoding="utf-8") as f:
+                cards = json.load(f)
         except Exception:
-            # Partial load is fine; accessors degrade gracefully.
-            pass
+            return
+        if not isinstance(cards, list):
+            return
+        for card in cards:
+            cid = card.get("id")
+            if not isinstance(cid, int):
+                continue
+            self.card_name[cid] = card.get("name", "")
+            ctype = card.get("cardType")
+            if isinstance(ctype, int):
+                self.card_type[cid] = ctype
+            if card.get("basic"):
+                self.is_basic_pokemon_id.add(cid)
+            if card.get("ex"):
+                self.is_ex_id.add(cid)
+            if card.get("megaEx"):
+                self.is_mega_id.add(cid)
+            dmg = int(card.get("bestDamage", 0) or 0)
+            self.card_best_damage[cid] = dmg
+        self.ok = False
 
     # --- accessors --------------------------------------------------------
     def type_of(self, card_id: int | None) -> int | None:
