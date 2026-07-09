@@ -1,32 +1,26 @@
 """Value-net leaf evaluation for the TurnPlanner (CPU, pure-numpy inference).
-
 The planner scores each candidate end-of-turn board with a *value function*.
 ``agent.planner._eval`` is a hand-tuned linear combination of board features.
 This module provides a drop-in learned alternative: the SAME feature vector is
 fed to a small model (logistic regression / 1-hidden-layer MLP) whose weights
 are trained offline on self-play rollouts (label = eventual game win).
-
 Design constraints (submission must run on Kaggle, CPU, no heavy deps):
 * Inference is pure numpy — no sklearn/torch at runtime.
 * Weights load from a small ``.npz`` bundled next to this file; if the file is
   absent or malformed, ``ValueNet.available`` is False and the planner keeps
   using its hand-tuned ``_eval`` (fail-safe, never raises).
-
 The feature extractor deliberately reuses the exact primitives that ``_eval``
 uses (``_prizes_left``, ``_active``, ``_best_affordable_dmg``, ``_can_attack``,
 ``_energy_in_play``, ``gd.best_damage``, ``gd.prize_value``) so the learned
 value is grounded in the same signal the hand model already trusted.
 """
 from __future__ import annotations
-
 import os
-
+import math
 try:
     import numpy as np
 except Exception:  # pragma: no cover - numpy is available in the sim image
     np = None
-
-
 # Ordered feature names — the training pipeline MUST emit vectors in this order.
 FEATURE_NAMES = (
     "prize_diff",        # (opp_left - my_left) / 6, in [-1, 1]
@@ -51,11 +45,9 @@ FEATURE_NAMES = (
 )
 N_FEATURES = len(FEATURE_NAMES)
 
-
 def extract_features(state, me, gd, helpers):
     """Return a length-N_FEATURES python list of floats for ``state`` from
     player ``me``'s perspective.
-
     ``helpers`` is a namespace/module exposing the planner primitives so this
     module has no import cycle with planner.py: ``_active``, ``_prizes_left``,
     ``_best_affordable_dmg``, ``_can_attack``, ``_energy_in_play``.
@@ -65,17 +57,14 @@ def extract_features(state, me, gd, helpers):
         return [0.0] * (N_FEATURES - 1) + [1.0]
     mp = players[me] if isinstance(players[me], dict) else {}
     op = players[1 - me] if isinstance(players[1 - me], dict) else {}
-
     my_left = helpers._prizes_left(mp)
     opp_left = helpers._prizes_left(op)
     my_act = helpers._active(mp)
     opp_act = helpers._active(op)
-
     f = {k: 0.0 for k in FEATURE_NAMES}
     f["prize_diff"] = (opp_left - my_left) / 6.0
     f["my_prize_left"] = my_left / 6.0
     f["opp_prize_left"] = opp_left / 6.0
-
     if opp_act:
         omax = opp_act.get("maxHp") or 0
         ohp = opp_act.get("hp") or 0
@@ -86,7 +75,6 @@ def extract_features(state, me, gd, helpers):
             dmg = helpers._best_affordable_dmg(my_act, opp_act, gd)
             if dmg >= ohp:
                 f["setup_ko"] = 1.0
-
     if my_act:
         mmax = my_act.get("maxHp") or 0
         mhp = my_act.get("hp") or 0
@@ -110,14 +98,12 @@ def extract_features(state, me, gd, helpers):
             f["active_loaded"] = min(aff / act_pot, 1.0)
     else:
         f["no_active"] = 1.0
-
     bench = list(mp.get("bench") or [])
     f["bench_frac"] = min(len(bench), 5) / 5.0
     ready = sum(1 for bp in bench if isinstance(bp, dict) and helpers._can_attack(bp, gd))
     f["bench_ready_frac"] = min(ready, 5) / 5.0
     f["energy_frac"] = min(helpers._energy_in_play(mp), 12) / 12.0
     f["hand_frac"] = min(int(mp.get("handCount") or 0), 10) / 10.0
-
     ob_dmg = 0.0
     ko_ct = 0
     for bp in (op.get("bench") or []):
@@ -134,42 +120,76 @@ def extract_features(state, me, gd, helpers):
     f["opp_bench_dmg"] = min(ob_dmg, 5.0) / 5.0
     f["bench_setup_ko"] = min(ko_ct, 5) / 5.0
     f["bias"] = 1.0
-
     return [f[k] for k in FEATURE_NAMES]
 
-
 class ValueNet:
-    """Pure-numpy value model. Supports logistic (1 layer) or 1-hidden MLP.
-
-    Weight bundle (.npz) keys:
-      kind = "logistic":  w[N_FEATURES]           -> sigmoid(x·w)
-      kind = "mlp":       W1[N_FEATURES,H], b1[H], W2[H], b2  -> sigmoid(...)
-    Output is P(win) in (0,1); the planner scales it into its value range.
     """
-
-    def __init__(self, path=None):
+    CPU-only value function.
+    Supports:
+        • logistic regression
+        • one hidden layer MLP
+    Additionally maintains an online bias term which the Supervisor can
+    continuously adapt without retraining the full network.
+    Final prediction:
+        sigmoid(network + adaptive_bias)
+    This lets long tournament runs calibrate evaluation while preserving the
+    offline trained weights.
+    """
+    def __init__(
+        self,
+        path=None,
+        weight_generator=None,
+    ):
         self.available = False
         self.kind = None
         self._w = None
-        self._W1 = self._b1 = self._W2 = self._b2 = None
+        self._W1 = None
+        self._b1 = None
+        self._W2 = None
+        self._b2 = None
+        # ---- fallback evaluator ----
+        self.weight_generator = weight_generator
         if path is None:
-            path = os.path.join(os.path.dirname(__file__), "value_net.npz")
+            path = os.path.join(
+                os.path.dirname(__file__),
+                "value_net.npz",
+            )
         if np is None or not os.path.exists(path):
             return
         try:
             d = np.load(path, allow_pickle=False)
-            kind = str(d["kind"]) if "kind" in d else "logistic"
+            kind = (
+                str(d["kind"])
+                if "kind" in d
+                else "logistic"
+            )
             if kind == "logistic":
-                w = np.asarray(d["w"], dtype=np.float64).ravel()
+                w = np.asarray(
+                    d["w"],
+                    dtype=np.float64,
+                ).ravel()
                 if w.shape[0] != N_FEATURES:
                     return
                 self._w = w
                 self.kind = "logistic"
             elif kind == "mlp":
-                self._W1 = np.asarray(d["W1"], dtype=np.float64)
-                self._b1 = np.asarray(d["b1"], dtype=np.float64).ravel()
-                self._W2 = np.asarray(d["W2"], dtype=np.float64).ravel()
-                self._b2 = float(np.asarray(d["b2"]).ravel()[0])
+                self._W1 = np.asarray(
+                    d["W1"],
+                    dtype=np.float64,
+                )
+                self._b1 = np.asarray(
+                    d["b1"],
+                    dtype=np.float64,
+                ).ravel()
+                self._W2 = np.asarray(
+                    d["W2"],
+                    dtype=np.float64,
+                ).ravel()
+                self._b2 = float(
+                    np.asarray(
+                        d["b2"]
+                    ).ravel()[0]
+                )
                 if self._W1.shape[0] != N_FEATURES:
                     return
                 self.kind = "mlp"
@@ -179,16 +199,91 @@ class ValueNet:
         except Exception:
             self.available = False
 
-    def predict(self, feats):
-        """feats: length-N_FEATURES sequence -> P(win) float in (0,1)."""
-        x = np.asarray(feats, dtype=np.float64).ravel()
+    # -------------------------------------------------------------
+    def raw_value(self, feats):
+        """
+        Raw network output before sigmoid.
+        """
+        x = np.asarray(
+            feats,
+            dtype=np.float64,
+        ).ravel()
         if self.kind == "logistic":
-            z = float(x @ self._w)
-        else:
-            h = np.tanh(x @ self._W1 + self._b1)
-            z = float(h @ self._W2 + self._b2)
-        # numerically stable sigmoid
+            return float(x @ self._w)
+        h = np.tanh(
+            x @ self._W1 + self._b1
+        )
+        return float(
+            h @ self._W2 + self._b2
+        )
+
+    # -------------------------------------------------------------
+    @staticmethod
+    def _sigmoid(z):
         if z >= 0:
-            return 1.0 / (1.0 + np.exp(-z))
+            return 1.0 / (
+                1.0 + np.exp(-z)
+            )
         e = np.exp(z)
         return e / (1.0 + e)
+
+    # -------------------------------------------------------------
+    def predict(self, feats):
+        """
+        Returns win probability.
+        If no trained model exists,
+        fall back to the handcrafted evaluator.
+        """
+        if not self.available:
+            if self.weight_generator is None:
+                return 0.5
+            result = self.weight_generator.evaluate(feats)
+            score = result.score
+            return 1.0 / (
+                1.0 +
+                math.exp(-score / 100.0)
+            )
+        x = np.asarray(
+            feats,
+            dtype=np.float64,
+        ).ravel()
+        if self.kind == "logistic":
+            z = float(
+                x @ self._w
+            )
+        else:
+            h = np.tanh(
+                x @ self._W1 + self._b1
+            )
+            z = float(
+                h @ self._W2 + self._b2
+            )
+        if z >= 0:
+            return 1.0 / (
+                1.0 +
+                np.exp(-z)
+            )
+        e = np.exp(z)
+        return e / (1.0 + e)
+    
+    # -------------------------------------------------------------
+    def calibrate(
+        self,
+        predicted,
+        outcome,
+        lr=0.05,
+    ):
+        """
+        Lightweight online calibration.
+        predicted : network probability
+        outcome :
+            1 = eventually won
+            0 = eventually lost
+        Only adjusts a single bias term.
+        """
+        error = outcome - predicted
+        self.bias += lr * error
+        
+    # -------------------------------------------------------------
+    def reset_calibration(self):
+        self.bias = 0.0

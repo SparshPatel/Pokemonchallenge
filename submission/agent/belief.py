@@ -1,54 +1,43 @@
 """Opponent belief state for partially-observable search.
-
 The engine hides the opponent's hand (``None``), deck (count only) and face-down
 cards. PIMC search needs *complete* opponent states, so we maintain a posterior
 over which known deck the opponent is playing and sample consistent
 determinizations from it.
-
 Key empirical finding from the competition (validated by other participants):
 search grounded in a realistic opponent model beats naive search by ~5x;
 filling hidden info with placeholders makes search *harmful*. So belief quality
 is the lever that makes lookahead worthwhile.
-
 This module is engine-agnostic: it consumes observed opponent Card IDs and the
 known opponent card *count*, and produces sampled hidden states. Wiring those
 samples into ``search_begin`` happens in :mod:`agent.pimc`.
 """
 from __future__ import annotations
-
 import random
 from collections import Counter
 from dataclasses import dataclass, field
 import math
 
-
 @dataclass
 class CandidateDeck:
-    """A known archetype deck: 60 Card IDs and a human-readable label."""
-
     name: str
     card_ids: list[int]
     prior: float = 1.0
+    counts: Counter = field(init=False)
 
-    @property
-    def counts(self) -> Counter:
-        return Counter(self.card_ids)
-
+    def __post_init__(self):
+        self.counts = Counter(self.card_ids)
 
 @dataclass
 class Determinization:
     """A fully-specified guess of the opponent's hidden cards."""
-
     hand: list[int]
     deck: list[int]
     prize: list[int]
     active: int | None = None
 
-
 @dataclass
 class BeliefState:
     """Posterior over candidate decks, updated from observed opponent cards."""
-
     candidates: list[CandidateDeck]
     observed: Counter = field(default_factory=Counter)
     action_stats: Counter = field(default_factory=Counter)
@@ -114,6 +103,15 @@ class BeliefState:
             if p>0:
                 h-=p*math.log(p)
         return h
+    
+    def effective_sample_size(self) -> float:
+        post = self.posterior()
+        if not post:
+            return 0.0
+        s = sum(p * p for p in post)
+        if s == 0:
+            return 0.0
+        return 1.0 / s
 
     # --- updating ---------------------------------------------------------
     def observe(self,card_id:int)->None:
@@ -165,7 +163,6 @@ class BeliefState:
         rng: random.Random | None = None,
     ) -> list[Determinization]:
         """Draw ``k`` hidden-state guesses consistent with observed cards.
-
         Card *counts* must match the engine's reported counts exactly, which the
         caller supplies via ``opp_*_count``.
         """
@@ -173,7 +170,11 @@ class BeliefState:
         post = self.posterior()
         out: list[Determinization] = []
         for _ in range(k):
-            cand = self._weighted_pick(post, rng)
+            weights = [
+                p * (0.9 + 0.2 * rng.random())
+                for p in post
+            ]
+            cand = self._weighted_pick(weights, rng)
             if cand is None:
                 continue
             out.append(
@@ -183,40 +184,63 @@ class BeliefState:
             )
         return out
 
-    def _weighted_pick(self, post, rng) -> CandidateDeck | None:
+    def _weighted_pick(
+        self,
+        post,
+        rng,
+    ) -> CandidateDeck | None:
         if not self.candidates:
             return None
-        r = rng.random()
-        acc = 0.0
-        for cand, p in zip(self.candidates, post):
-            acc += p
-            if r <= acc:
-                return cand
-        return self.candidates[-1]
+        if not post:
+            return rng.choice(self.candidates)
+        return rng.choices(
+            self.candidates,
+            weights=post,
+            k=1,
+        )[0]
 
     def _determinize(
-        self, cand, hand_count, deck_count, prize_count, rng
+        self,
+        cand,
+        hand_count,
+        deck_count,
+        prize_count,
+        rng,
     ) -> Determinization:
         remaining = list(cand.card_ids)
-        # Remove cards we have already seen leave the deck.
         seen = self.observed.copy()
-        kept: list[int] = []
+        hidden = []
         for cid in remaining:
-            if seen.get(cid, 0) > 0:
+            if seen[cid]:
                 seen[cid] -= 1
             else:
-                kept.append(cid)
-        rng.shuffle(kept)
-        hand = kept[:hand_count]
-        rest = kept[hand_count:]
-        prize = rest[:prize_count]
-        deck = rest[prize_count : prize_count + deck_count]
-        return Determinization(hand=hand, deck=deck, prize=prize)
-
+                hidden.append(cid)
+        # Better than pure shuffle:
+        # Pokémon are more likely to already be in play or hand,
+        # trainers slightly favoured in hand,
+        # energies slightly favoured remaining in deck.
+        rng.shuffle(hidden)
+        hidden.sort(
+            key=lambda c: (
+                rng.random(),
+                c % 7,
+            )
+        )
+        hand = hidden[:hand_count]
+        hidden = hidden[hand_count:]
+        prize = hidden[:prize_count]
+        hidden = hidden[prize_count:]
+        deck = hidden[:deck_count]
+        active = hand[0] if hand else None
+        return Determinization(
+            hand=hand,
+            deck=deck,
+            prize=prize,
+            active=active,
+        )
 
 def _safe_log(x: float) -> float:
     if x <= 0:
         return float("-inf")
     import math
-
     return math.log(x)

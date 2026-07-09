@@ -1,9 +1,7 @@
 """Game-state-aware heuristic policy — the baseline and the safety fallback.
-
 Unlike a pure type-priority scorer, this policy resolves each option to the real
 card/attack it represents (using the engine-backed :mod:`agent.gamedata`) and the
 current board state, so it can:
-
 * take a **lethal attack** when the best affordable attack KOs the opponent's
   Active Pokémon,
 * otherwise **set up first** — use free abilities, attach Energy to the Active
@@ -12,20 +10,15 @@ current board state, so it can:
 * make sensible **setup / search / discard** picks (best attacker to the Active
   Spot; discard the least valuable cards),
 * never pass the turn while a productive action remains.
-
 Every accessor is defensive; missing fields degrade to a safe, legal choice.
 """
 from __future__ import annotations
-
 import json
 import os
-
 from .adapter import Option, Select
 from .enums import AreaType, OptionType, SelectContext, SelectType
 from .gamedata import GameData
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
-
 # ---------------------------------------------------------------------------
 # Tunable decision weights
 # ---------------------------------------------------------------------------
@@ -85,11 +78,8 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "end": -100.0,              # only when nothing productive remains
     "prefer_first": 0.0,        # >0.5 => choose to go FIRST on the coin
 }
-
-
 def _load_weights() -> dict[str, float]:
     """Load frozen, offline-trained weights if present; else the defaults.
-
     Crash-safe and validated per-key: an unknown key, wrong type, or missing /
     corrupt file degrades to the hand-tuned default for that entry, so a bad
     artifact can never break the runtime.
@@ -107,20 +97,15 @@ def _load_weights() -> dict[str, float]:
         pass
     return weights
 
-
 WEIGHTS: dict[str, float] = _load_weights()
-
 # Going first vs second. Our Ancient Box list is an aggressive setup deck and the
 # gauntlet shows it performs better taking the SECOND turn (attacking on its first
 # turn rather than ceding tempo): over 200-game runs vs the strong baseline,
 # going second ~0.53 vs going first ~0.45. Driven by the ``prefer_first`` weight
 # so the offline trainer can revisit the choice. Default (0.0) => go second.
 PREFER_FIRST: bool = WEIGHTS["prefer_first"] > 0.5
-
-
 def set_weights(weights: dict[str, float] | None) -> None:
     """Override the decision weights at runtime (used by the offline trainer).
-
     Sequential by construction: the engine asks one player to choose at a time,
     and each agent calls this immediately before :func:`choose`, so self-play
     with two different weight vectors in one process is safe.
@@ -131,7 +116,6 @@ def set_weights(weights: dict[str, float] | None) -> None:
         merged.update({k: float(v) for k, v in weights.items() if k in DEFAULT_WEIGHTS})
     WEIGHTS = merged
     PREFER_FIRST = WEIGHTS["prefer_first"] > 0.5
-
 # Contexts where we are *acquiring / placing* cards (pick the most valuable).
 _ACQUIRE_CONTEXTS = {
     SelectContext.SETUP_ACTIVE_POKEMON,
@@ -147,7 +131,6 @@ _ACQUIRE_CONTEXTS = {
     SelectContext.ATTACH_TO,
 }
 
-
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -155,7 +138,6 @@ def choose(obs_dict, select: Select, gd: GameData) -> list[int]:
     n = len(select.options)
     if n == 0:
         return list(range(max(0, select.min_count)))
-
     st = select.select_type
     try:
         if st == SelectType.MAIN:
@@ -170,7 +152,6 @@ def choose(obs_dict, select: Select, gd: GameData) -> list[int]:
         # Any resolution failure: return a guaranteed-legal selection.
         return _fallback(select)
 
-
 # ---------------------------------------------------------------------------
 # MAIN turn decisions
 # ---------------------------------------------------------------------------
@@ -181,7 +162,6 @@ def _choose_main(obs_dict, select: Select, gd: GameData) -> int:
     hand = me.get("hand") or []
     opp_hp = _opponent_active_hp(state, yi)
     bench_room = _bench_has_room(state, yi)
-
     # Board context for the threat-aware features (computed once per decision).
     opp_active = _active_pokemon(state, 1 - yi)
     opp_player = _player(state, 1 - yi)
@@ -203,19 +183,15 @@ def _choose_main(obs_dict, select: Select, gd: GameData) -> int:
         # Fezandipiti ex): it can never trade prizes, so promote a real attacker.
         "active_is_support": gd.best_damage(_active_card_id(state, yi)) <= 0,
     }
-
     best_idx, best_score = 0, float("-inf")
     for opt in select.options:
         s = _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd)
         if s > best_score:
             best_score, best_idx = s, opt.index
     return best_idx
-
-
 def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
     t = opt.type
     w = WEIGHTS
-
     if t == OptionType.ATTACK:
         dmg = gd.attack_damage(opt.attack_id)
         # Mad Bite (Bloodmoon Ursaluna, attack 175): 100 + 30 per damage counter
@@ -250,10 +226,8 @@ def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
         if opp_prizes > 0 and (0 < my_prizes <= 2 or opp_prizes <= 2):
             score += w["attack_urgency"]
         return score
-
     if t == OptionType.ABILITY:
         return w["ability"]               # free value
-
     if t == OptionType.EVOLVE:
         # Board upgrade: unlocks higher attacks and more HP. Prefer evolving a
         # target that will be attack-ready (or 1 energy away) after evolution,
@@ -274,7 +248,6 @@ def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
                     if cost and len(energies) + 1 >= len(cost):
                         return w["evolve"] + 30.0
         return w["evolve"]
-
     if t == OptionType.ATTACH:
         # Energy-need awareness: feed a Pokémon that still needs Energy to power
         # its hardest attack; an already-powered target is the lowest-priority
@@ -310,7 +283,6 @@ def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
             invested = len(target.get("energies") or [])
             score += invested * w["attach_concentrate"]
         return score
-
     if t == OptionType.PLAY:
         cid = _card_at(hand, opt.hand_index)
         if gd.is_basic_pokemon(cid):
@@ -334,7 +306,6 @@ def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
                 return w["play_item"] + 20.0
             return w["play_item"]                 # ball / draw / recovery
         return w["play_other"]                    # tool / stadium / other
-
     if t == OptionType.RETREAT:
         # Retreat a doomed Active (the opponent can KO it next turn) only when a
         # fresh Bench attacker is ready to take over.
@@ -353,14 +324,12 @@ def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
         return w["end"]                   # only when nothing productive remains
     return 1
 
-
 # ---------------------------------------------------------------------------
 # Card selections (setup / search / discard)
-# ---------------------------------------------------------------------------
+# # ---------------------------------------------------------------------------
 def _choose_cards(obs_dict, select: Select, gd: GameData) -> list[int]:
     state = obs_dict.get("current") if isinstance(obs_dict, dict) else None
     yi = state.get("yourIndex", 0) if isinstance(state, dict) else 0
-
     # EVOLVES_FROM: which pre-evolution to evolve from. Prefer the copy with
     # the most energy already attached — it carries over to the evolved form
     # and saves setup turns. Same card ID for all options, so _card_value alone
@@ -375,7 +344,6 @@ def _choose_cards(obs_dict, select: Select, gd: GameData) -> list[int]:
         k = max(select.min_count, 1)
         k = min(k, select.max_count or k, len(select.options))
         return sorted(idx for _, idx in scored[:k])
-
     # Gust selection (e.g. Boss's Orders): every option targets an opponent
     # Pokémon. Pick the one we can KO now (prize), preferring an ex (2 Prizes).
     opp = 1 - yi
@@ -383,7 +351,6 @@ def _choose_cards(obs_dict, select: Select, gd: GameData) -> list[int]:
         o.player_index == opp for o in select.options
     ):
         return _choose_gust_target(select, state, yi, gd)
-
     # Bench-snipe target selection (e.g. Cruel Arrow / spread damage attacks):
     # options target opponent's bench specifically. Score KO-able targets highest,
     # then prefer ex/Mega-ex for prize value, then lowest HP.
@@ -411,7 +378,6 @@ def _choose_cards(obs_dict, select: Select, gd: GameData) -> list[int]:
         k = max(select.min_count, 1)
         k = min(k, select.max_count or k, len(select.options))
         return sorted(idx for _, idx in scored[:k])
-
     # Switch-in selection: prefer already-powered attackers over cold ones.
     # This fires when we choose which Bench Pokémon to bring Active (after a KO
     # or a manual retreat), and gets the highest-value ready attacker in.
@@ -430,24 +396,19 @@ def _choose_cards(obs_dict, select: Select, gd: GameData) -> list[int]:
         k = max(select.min_count, 1)
         k = min(k, select.max_count or k, len(select.options))
         return sorted(idx for _, idx in scored[:k])
-
     acquire = select.context in _ACQUIRE_CONTEXTS
     scored = []
     for opt in select.options:
         cid = _resolve_card_id(opt, obs_dict, select, state, yi)
         scored.append((_card_value(cid, gd), opt.index))
-
     # Acquire: take the most valuable; otherwise take the least valuable.
     scored.sort(reverse=acquire)
-
     n = len(select.options)
     # Only grab the extra (optional) cards when the context is clearly
     # beneficial; for discards and unknown contexts take the minimum required.
     k = (select.max_count or select.min_count) if acquire else select.min_count
     k = max(select.min_count, min(k, n))
     return sorted(idx for _, idx in scored[:k])
-
-
 def _card_value(cid, gd: GameData) -> float:
     if cid is None:
         return 1.0
@@ -470,13 +431,11 @@ def _card_value(cid, gd: GameData) -> float:
         return 15.0
     return 10.0
 
-
 # ---------------------------------------------------------------------------
 # Simple selections
 # ---------------------------------------------------------------------------
 def _choose_yes_no(select: Select) -> int:
     """Yes/No decisions.
-
     Default to YES — the engine asks Yes/No to *activate* beneficial effects. The
     one deliberate exception is the go-first/second coin choice (IS_FIRST), which
     we resolve via :data:`PREFER_FIRST`.
@@ -490,21 +449,16 @@ def _choose_yes_no(select: Select) -> int:
         if opt.type == OptionType.YES:
             return opt.index
     return select.options[0].index
-
-
 def _choose_lowest(select: Select) -> list[int]:
     k = max(select.min_count, 1)
     k = min(k, select.max_count or k, len(select.options))
     return list(range(k))
-
-
 def _fallback(select: Select) -> list[int]:
     n = len(select.options)
     k = max(0, min(select.min_count, n))
     if k == 0 and select.max_count >= 1 and select.select_type == SelectType.MAIN:
         k = 1
     return list(range(k))
-
 
 # ---------------------------------------------------------------------------
 # State helpers
@@ -516,8 +470,6 @@ def _player(state, yi) -> dict:
     if 0 <= yi < len(players) and isinstance(players[yi], dict):
         return players[yi]
     return {}
-
-
 def _attach_target(opt: Option, me: dict) -> dict | None:
     """Resolve the Pokémon an ATTACH option targets (Active or a Bench slot)."""
     idx = opt.in_play_index
@@ -529,7 +481,6 @@ def _attach_target(opt: Option, me: dict) -> dict | None:
         return arr[idx]
     return None
 
-
 # ---------------------------------------------------------------------------
 # Threat model / board reading (for the danger-aware features)
 # ---------------------------------------------------------------------------
@@ -538,16 +489,11 @@ def _active_pokemon(state, pi) -> dict | None:
     if active and isinstance(active[0], dict):
         return active[0]
     return None
-
-
 def _active_card_id(state, pi) -> int | None:
     pkmn = _active_pokemon(state, pi)
     return pkmn.get("id") if isinstance(pkmn, dict) else None
-
-
 def _best_affordable_damage(pkmn: dict | None, gd: GameData, defender: dict | None = None) -> int:
     """Highest damage among the attacks ``pkmn`` can currently pay for.
-
     When ``defender`` is given, damage is Weakness/Resistance-adjusted for that
     defender (used by the threat model and gust targeting).
     """
@@ -566,8 +512,6 @@ def _best_affordable_damage(pkmn: dict | None, gd: GameData, defender: dict | No
                 dmg = gd.effective_damage(cid, dmg, def_id)
             best = max(best, dmg)
     return best
-
-
 def _in_danger(state, yi, gd: GameData) -> bool:
     """True if the opponent's Active can KO our Active on its next turn."""
     mine = _active_pokemon(state, yi)
@@ -580,22 +524,16 @@ def _in_danger(state, yi, gd: GameData) -> bool:
     # Weakness cuts both ways: account for *our* Active's Weakness to the
     # opponent's type when judging whether we are about to be KO'd.
     return _best_affordable_damage(opp, gd, defender=mine) >= my_hp
-
-
 def _has_bench_attacker(state, yi, gd: GameData) -> bool:
     """True if a healthy Benched Pokémon could take over as attacker."""
     for p in _player(state, yi).get("bench") or []:
         if isinstance(p, dict) and (p.get("hp") or 0) > 0 and gd.best_damage(p.get("id")) > 0:
             return True
     return False
-
-
 def _bench_empty_slots(state, yi) -> int:
     me = _player(state, yi)
     bench = me.get("bench") or []
     return max(0, int(me.get("benchMax") or 5) - len(bench))
-
-
 def _completes_attack(pkmn: dict, gd: GameData) -> bool:
     """True if one more Energy likely finishes the Pokémon's cheapest attack."""
     cid = pkmn.get("id")
@@ -608,8 +546,6 @@ def _completes_attack(pkmn: dict, gd: GameData) -> bool:
     if gd.can_pay(cheapest, attached):
         return False  # already able to attack
     return len(attached) + 1 >= len(cheapest)
-
-
 def _option_pokemon(opt: Option, state, default_pi: int) -> dict | None:
     """Resolve the board Pokémon an option references (active or bench)."""
     pi = opt.player_index if opt.player_index is not None else default_pi
@@ -622,8 +558,6 @@ def _option_pokemon(opt: Option, state, default_pi: int) -> dict | None:
     if 0 <= idx < len(arr) and isinstance(arr[idx], dict):
         return arr[idx]
     return None
-
-
 def _choose_gust_target(select: Select, state, yi, gd: GameData) -> list[int]:
     """Pick the best opponent Pokémon to drag up (Boss's Orders / gust)."""
     opp = 1 - yi
@@ -637,8 +571,6 @@ def _choose_gust_target(select: Select, state, yi, gd: GameData) -> list[int]:
     k = max(select.min_count, 1)
     k = min(k, select.max_count or k, n)
     return sorted(idx for _, idx in scored[:k])
-
-
 def _gust_value(target: dict | None, my_active: dict | None, gd: GameData) -> float:
     if not isinstance(target, dict):
         return 0.0
@@ -656,8 +588,6 @@ def _gust_value(target: dict | None, my_active: dict | None, gd: GameData) -> fl
     if gd.is_ex(cid):
         v += WEIGHTS["gust_ex"]   # ex = 2 Prizes
     return v
-
-
 def _hand(state, yi) -> list:
     if not isinstance(state, dict):
         return []
@@ -665,15 +595,11 @@ def _hand(state, yi) -> list:
     if yi < len(players) and isinstance(players[yi], dict):
         return players[yi].get("hand") or []
     return []
-
-
 def _card_at(hand, idx):
     if idx is None or not isinstance(hand, list) or not (0 <= idx < len(hand)):
         return None
     entry = hand[idx]
     return entry.get("id") if isinstance(entry, dict) else None
-
-
 def _opponent_active_hp(state, yi):
     if not isinstance(state, dict):
         return None
@@ -685,8 +611,6 @@ def _opponent_active_hp(state, yi):
     if not active or not isinstance(active[0], dict):
         return None
     return active[0].get("hp")
-
-
 def _bench_has_room(state, yi) -> bool:
     if not isinstance(state, dict):
         return True
@@ -697,7 +621,6 @@ def _bench_has_room(state, yi) -> bool:
     bench = me.get("bench") or []
     return len(bench) < int(me.get("benchMax") or 5)
 
-
 _AREA_FIELD = {
     AreaType.HAND: "hand",
     AreaType.BENCH: "bench",
@@ -705,8 +628,6 @@ _AREA_FIELD = {
     AreaType.ACTIVE: "active",
     AreaType.PRIZE: "prize",
 }
-
-
 def _resolve_card_id(opt: Option, obs_dict, select: Select, state, yi):
     """Best-effort mapping of a CARD option to its underlying card id."""
     if opt.card_id is not None:
@@ -730,8 +651,6 @@ def _resolve_card_id(opt: Option, obs_dict, select: Select, state, yi):
     if not (0 <= idx < len(arr)) or not isinstance(arr[idx], dict):
         return None
     return arr[idx].get("id")
-
-
 def _can_attack(pkmn: dict, gd: GameData) -> bool:
     cid = pkmn.get("id")
     if cid is None:
@@ -741,8 +660,6 @@ def _can_attack(pkmn: dict, gd: GameData) -> bool:
         if gd.can_pay(gd.attack_cost(aid), attached):
             return True
     return False
-
-
 def _powered_switch_value(pkmn: dict, gd: GameData) -> float:
     hp = pkmn.get("hp") or 0
     cid = pkmn.get("id")

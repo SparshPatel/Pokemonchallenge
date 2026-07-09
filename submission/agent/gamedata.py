@@ -1,23 +1,18 @@
 """Authoritative runtime card/attack data, sourced from the bundled engine.
-
 At battle time the ``cg`` package is on the path, so ``cg.api`` can give us the
 ground-truth card types and per-attack damage/cost. This is far richer than the
 CSV-derived ``cards.json`` (which has no attackId -> damage mapping), and it is
 what makes damage-aware play and lethal detection possible.
-
 Everything is crash-safe: if the engine import fails for any reason we fall back
 to the JSON stats (types only, no attack table), and every accessor returns a
 safe default. The data is loaded once and cached.
 """
 from __future__ import annotations
-
 from .enums import CardType, EnergyType
-
 # Keywords that mark a Trainer as a "dig" card — one that searches the deck or
 # otherwise digs for board pieces. Used for trainer sequencing (play these to
 # find Pokémon/Energy before committing the once-per-turn Supporter).
 _DIG_KEYWORDS = ("ball", "poffin", "nest", "communication", "gear", "search")
-
 # Damage modifiers from the official rulebook (Active Pokémon only):
 #   * Weakness multiplies the attacker's damage (the SV/Mega era uses ×2).
 #   * Resistance subtracts a flat amount (−30 in the current standard).
@@ -25,15 +20,12 @@ _DIG_KEYWORDS = ("ball", "poffin", "nest", "communication", "gear", "search")
 # (``energyType``), never the attack's Energy cost.
 WEAKNESS_MULT = 2.0
 RESISTANCE_FLAT = 30
-
-
 # Residual damage (in HP) a Special Condition inflicts per Pokémon Checkup,
 # per the rulebook: Burned places 2 damage counters (20 HP), Poisoned places 1
 # (10 HP). These are *between-turns* effects, so they add to an attack's
 # *expected* value but never to immediate lethal detection.
 _BURN_RESIDUAL = 20
 _POISON_RESIDUAL = 10
-
 
 class _Attack:
     __slots__ = ("attack_id", "name", "damage", "energies", "effect_bonus")
@@ -49,7 +41,6 @@ class _Attack:
 
 class GameData:
     """Cached card-type and attack tables for runtime decision-making."""
-
     _instance: "GameData | None" = None
 
     def __init__(self) -> None:
@@ -163,7 +154,6 @@ class GameData:
 
     def attack_effect_bonus(self, attack_id: int | None) -> int:
         """Expected residual damage (HP) from an attack's Special Condition.
-
         Burned ~20/checkup, Poisoned ~10/checkup. A one-turn estimate used to
         value condition-inflicting attacks; never counted toward immediate lethal
         (these resolve between turns, after the opponent may retreat/heal).
@@ -190,7 +180,6 @@ class GameData:
         self, attacker_id: int | None, base_dmg: int, defender_id: int | None
     ) -> int:
         """Damage ``attacker_id`` deals to the Active ``defender_id``.
-
         Applies Weakness (×2) and Resistance (flat −) per the rulebook, matched
         against the *attacker's* Pokémon type. Degrades to ``base_dmg`` when type
         data is missing. Only meaningful for the Active Spot (callers ensure the
@@ -232,10 +221,8 @@ class GameData:
                 return False
         colorless = sum(1 for c in cost if c == EnergyType.COLORLESS)
         return len(pool) >= colorless
-
     def needs_energy(self, card_id: int | None, attached: list[int]) -> bool:
         """True if ``card_id`` cannot yet pay its most expensive attack.
-
         A Pokémon that can already power its hardest attack does not benefit from
         more Energy — attaching to it instead of a needier target (or instead of
         attacking) is wasteful.
@@ -247,4 +234,12 @@ class GameData:
         if not costs:
             return False  # no energy-costed attack → no need to feed it
         hardest = max(costs, key=len)
+        '''This assumes
+            longest cost == hardest attack
+            which is true 99% of the time.
+            You could theoretically use'''
+        '''max(costs, key=lambda c: (
+            len(c),
+            sum(e != EnergyType.COLORLESS for e in c)
+        ))'''
         return not self.can_pay(hardest, list(attached or []))

@@ -6,7 +6,6 @@ present at battle time). Values are taken verbatim from the cabt API reference.
 """
 from __future__ import annotations
 
-
 class OptionType:
     NUMBER = 0
     YES = 1
@@ -26,7 +25,6 @@ class OptionType:
     SKILL = 15
     SPECIAL_CONDITION = 16
 
-
 class SelectType:
     MAIN = 0
     CARD = 1
@@ -40,7 +38,6 @@ class SelectType:
     YES_NO = 9
     SPECIAL_CONDITION = 10
 
-
 class CardType:
     POKEMON = 0
     ITEM = 1
@@ -49,7 +46,6 @@ class CardType:
     STADIUM = 4
     BASIC_ENERGY = 5
     SPECIAL_ENERGY = 6
-
 
 class SelectContext:
     MAIN = 0
@@ -102,7 +98,6 @@ class SelectContext:
     AFFECT_SPECIAL_CONDITION = 47
     RECOVER_SPECIAL_CONDITION = 48
 
-
 class AreaType:
     DECK = 1
     HAND = 2
@@ -116,7 +111,6 @@ class AreaType:
     PRE_EVOLUTION = 10
     PLAYER = 11
     LOOKING = 12
-
 
 class EnergyType:
     COLORLESS = 0
@@ -132,10 +126,8 @@ class EnergyType:
     RAINBOW = 10
     TEAM_ROCKET = 11
 
-
 class LogType:
     RESULT = 23
-
 
 # Single-character type code (matches card_data.py) → EnergyType id.
 TYPE_CODE_TO_ENERGY = {
