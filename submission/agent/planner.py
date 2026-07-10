@@ -37,6 +37,7 @@ from .evaluation import (
     Evaluator,
     EvaluationContext,
 )
+from .board_value import BoardEvaluator
 import dataclasses
 import importlib
 import math
@@ -168,8 +169,13 @@ class TurnPlanner:
             self.weight_generator,
             self.match_learner,
         )
+        self.board_evaluator = BoardEvaluator(
+            self.gamedata,
+        )
         self.rng = random.Random(seed)
         self.cpuct = 1.4
+        self.dirichlet_alpha = 0.30
+        self.dirichlet_epsilon = 0.25
         self.min_pw = 2
         self.pw_alpha = 0.50
         
@@ -302,6 +308,8 @@ class TurnPlanner:
             return None
         self.ctx.reset()
         self.ctx.deadline = deadline
+        # Needed so _expand_node() knows which node is the root.
+        self._root_search_id = ss.searchId
         try:
             values = self._expand_root(
                 eng,
@@ -311,6 +319,7 @@ class TurnPlanner:
         except Exception:
             values = None
         finally:
+            self._root_search_id = None
             try:
                 eng.search_end()
             except Exception:
@@ -352,11 +361,23 @@ class TurnPlanner:
             )
         root = self._node(root_id)
         values = {}
+        total_visits = max(
+            1,
+            sum(
+                self._node(cid).visits
+                for cid in root.children.values()
+            ),
+        )
         for action, child_id in root.children.items():
             child = self._node(child_id)
             if child.visits == 0:
                 continue
-            values[action] = child.value
+            # Blend value with normalized visit count.
+            visit_fraction = child.visits / total_visits
+            values[action] = (
+                0.70 * child.value
+                + 0.30 * visit_fraction * TERMINAL_WIN
+            )
         return values
 
     def _state_key(
@@ -427,10 +448,28 @@ class TurnPlanner:
         path,
         value,
     ):
+        self._revert_virtual_loss(path)
         for sid in reversed(path):
             node = self._node(sid)
             node.visits += 1
             node.value_sum += value
+            
+    def _apply_virtual_loss(
+        self,
+        path,
+    ):
+        for sid in path:
+            node = self._node(sid)
+            node.virtual_visits += 1
+
+def _revert_virtual_loss(
+    self,
+    path,
+):
+    for sid in path:
+        node = self._node(sid)
+        if node.virtual_visits > 0:
+            node.virtual_visits -= 1
             
     def _apply_virtual_loss(
         self,
@@ -461,14 +500,46 @@ class TurnPlanner:
         node_dict,
         select,
     ):
+        """
+        Expand a node exactly once.
+        Root receives Dirichlet exploration noise (AlphaZero).
+        Every other node simply stores the policy prior.
+        """
         node = self._node(search_id)
         if node.expanded:
             return
-        node.priors = self._policy_prior(
+        priors = self._policy_prior(
             node_dict,
             select,
             search_id,
         )
+        # Apply Dirichlet noise ONLY at the root.
+        if (
+            search_id == getattr(self, "_root_search_id", None)
+            and len(priors) > 1
+        ):
+            actions = list(priors.keys())
+            noise = self.rng.gammavariate(
+                self.dirichlet_alpha,
+                1.0,
+            )
+            noise = [
+                self.rng.gammavariate(
+                    self.dirichlet_alpha,
+                    1.0,
+                )
+                for _ in actions
+            ]
+            total = sum(noise)
+            if total > 0:
+                noise = [n / total for n in noise]
+                eps = self.dirichlet_epsilon
+                for action, eta in zip(actions, noise):
+                    priors[action] = (
+                        (1.0 - eps) * priors[action]
+                        + eps * eta
+                    )
+        node.priors = priors
         node.expanded = True
 
     def _ucb_score(
@@ -818,79 +889,110 @@ class TurnPlanner:
         path,
     ):
         """
-        Expand a search node using progressive widening and PUCT.
+        Expand one search node using
+        Progressive Widening +
+        PUCT +
+        Virtual Loss.
         """
         self._expand_node(
             ss.searchId,
             node,
             select,
         )
-        node_stats = self._node(ss.searchId)
-        allowed_width = self._progressive_width(
+        stats = self._node(ss.searchId)
+        allowed = self._progressive_width(
             ss.searchId,
-            len(node_stats.priors),
+            len(stats.priors),
         )
-        # Expand unexplored children first
-        ordered_actions = sorted(
-            node_stats.priors.items(),
-            key=lambda x: x[1],
-            reverse=True,
-        )
-        for action, _ in ordered_actions:
-            if len(node_stats.children) >= allowed_width:
-                break
-            if action not in node_stats.children:
+        # --------------------------------------------------
+        # Expand a new child first (Progressive Widening)
+        # --------------------------------------------------
+        if len(stats.children) < allowed:
+            unexplored = [
+                a
+                for a in stats.priors
+                if a not in stats.children
+            ]
+            if unexplored:
+                unexplored.sort(
+                    key=lambda a: stats.priors[a],
+                    reverse=True,
+                )
+                action = unexplored[0]
                 nxt = self._step_child(
                     eng,
                     ss,
                     action,
                 )
                 if nxt is None:
-                   continue
+                    return self._eval(state, me)
                 child_id = nxt.searchId
-                node_stats.children[action] = child_id
+                stats.children[action] = child_id
                 child_node = _as_obs_dict(nxt)
                 if child_node is not None:
-                    child_select = extract_select(child_node)
+                    child_select = extract_select(
+                        child_node
+                    )
                     if child_select is not None:
                         self._expand_node(
                             child_id,
                             child_node,
                             child_select,
                         )
-                return self._plan(
+                new_path = path + [child_id]
+                self._apply_virtual_loss(
+                    new_path
+                )
+                value = self._plan(
                     eng,
                     nxt,
                     me,
                     depth - 1,
-                    path + [child_id],
+                    new_path,
                 )
-        # Otherwise descend into the best existing child.
-        best_action, _ = self._select_child(
-            ss.searchId,
-        )
-        if best_action is None:
-            return self._eval(
-                state,
-                me,
+                self._revert_virtual_loss(
+                    new_path
+                )
+                return value
+        # --------------------------------------------------
+        # Otherwise select an existing child using PUCT
+        # --------------------------------------------------
+        best_action = None
+        best_score = -float("inf")
+        for action, child_id in stats.children.items():
+            score = self._ucb_score(
+                ss.searchId,
+                child_id,
+                stats.priors[action],
             )
+            if score > best_score:
+                best_score = score
+                best_action = action
+        if best_action is None:
+            return self._eval(state, me)
         nxt = self._step_child(
             eng,
             ss,
             best_action,
         )
         if nxt is None:
-            return self._eval(
-                state,
-                me,
-            )
-        return self._plan(
+            return self._eval(state, me)
+        child_id = nxt.searchId
+        new_path = path + [child_id]
+        self._apply_virtual_loss(
+            new_path
+        )
+        value = self._plan(
             eng,
             nxt,
             me,
             depth - 1,
-            path + [nxt.searchId],
+            new_path,
         )
+        self._revert_virtual_loss(
+            new_path
+        )
+        return value
     
     def _plan(
         self,
@@ -900,85 +1002,81 @@ class TurnPlanner:
         depth,
         path,
     ):
-        node = _as_obs_dict(ss)
-        if node is None:
-            return 0.0
-        state = node.get("current")
-        if not isinstance(state, dict):
-            return 0.0
-        key = self._state_key(state, me)
-        if key is None:
-            key = ("leaf", id(state))
-        cached = self.ctx.cache.search.get(
-            (key, depth)
-        )
-        
-        if cached is not None:
-            self._backup(path, cached)
-            return cached
-        select = extract_select(node)
-        # --------------------------------------------------
-        # Terminal state
-        # --------------------------------------------------
-        value = self._check_terminal(
-            state,
-            me,
-        )
-        if value is not None:
-            self.ctx.cache.search[(key, depth)] = value
-            self._backup(path, value)
-            return value
-        # --------------------------------------------------
-        # Cutoff
-        # --------------------------------------------------
-        value = self._check_cutoff(
-            state,
-            select,
-            me,
-            depth,
-        )
-        if value is not None:
-            self.ctx.cache.search[(key, depth)] = value
-            self._backup(path, value)
-            return value
-        # --------------------------------------------------
-        # Opponent turn
-        # --------------------------------------------------
-        value = self._handle_opponent(
-            eng,
-            ss,
-            state,
-            me,
-        )
-        if value is not None:
-            self.ctx.cache.search[(key, depth)] = value
-            self._backup(path, value)
-            return value
-        # --------------------------------------------------
-        # Forced selections
-        # --------------------------------------------------
-        value = self._handle_forced_selection(
-            eng,
-            ss,
-            node,
-            state,
-            select,
-            me,
-            depth,
-            path,
-        )
-        if value is not None:
-            self.ctx.cache.search[(key, depth)] = value
-            self._backup(path, value)
-            return value
-        # --------------------------------------------------
-        # Expand node
-        # --------------------------------------------------
-        # --------------------------------------------------
-        # Expand node
-        # --------------------------------------------------
         self._apply_virtual_loss(path)
         try:
+            node = _as_obs_dict(ss)
+            if node is None:
+                return 0.0
+            state = node.get("current")
+            if not isinstance(state, dict):
+                return 0.0
+            key = self._state_key(state, me)
+            if key is None:
+                key = ("leaf", id(state))
+            cached = self.ctx.cache.search.get(
+                (key, depth)
+            )
+            if cached is not None:
+                self._backup(path, cached)
+                return cached
+            select = extract_select(node)
+            # ------------------------------
+            # Terminal node
+            # ------------------------------
+            value = self._check_terminal(
+                state,
+                me,
+            )
+            if value is not None:
+                self.ctx.cache.search[(key, depth)] = value
+                self._backup(path, value)
+                return value
+            # ------------------------------
+            # Cutoff
+            # ------------------------------
+            value = self._check_cutoff(
+                state,
+                select,
+                me,
+                depth,
+            )
+            if value is not None:
+                self.ctx.cache.search[(key, depth)] = value
+                self._backup(path, value)
+                return value
+            # ------------------------------
+            # Opponent
+            # ------------------------------
+            value = self._handle_opponent(
+                eng,
+                ss,
+                state,
+                me,
+            )
+            if value is not None:
+                self.ctx.cache.search[(key, depth)] = value
+                self._backup(path, value)
+                return value
+            # ------------------------------
+            # Forced selections
+            # ------------------------------
+            value = self._handle_forced_selection(
+                eng,
+                ss,
+                node,
+                state,
+                select,
+                me,
+                depth,
+                path,
+            )
+            if value is not None:
+                self.ctx.cache.search[(key, depth)] = value
+                self._backup(path, value)
+                return value
+            # ------------------------------
+            # Expand
+            # ------------------------------
             value = self._expand_search_node(
                 eng,
                 ss,
@@ -989,12 +1087,14 @@ class TurnPlanner:
                 depth,
                 path,
             )
+            self.ctx.cache.search[
+                (key, depth)
+            ] = value
+            self._backup(path, value)
+            return value
         finally:
+            # Safety in case anything throws before _backup()
             self._revert_virtual_loss(path)
-        self.ctx.cache.search[
-            (key, depth)
-        ] = value
-        return value
     
     def _drive_to_my_turn(self, eng, ss, me) -> float:
         """Drive every decision with the rule policy until it is our next MAIN
@@ -1119,39 +1219,44 @@ class TurnPlanner:
         # deterministic heuristic evaluation
         # --------------------------------------------------
         if score is None:
-            context = EvaluationContext(
-                game_phase=(
-                    1.0
-                    - (
-                        features[1]
-                        + features[2]
-                    )
-                    / 12.0
-                ),
-                prize_diff=features[0],
-                search_depth=self.max_depth,
-                search_confidence=1.0,
-                opponent_embedding=self.opponent_embedding,
-            )
-            if (
-                self.use_weight_net
-                and self.weight_net is not None
-            ):
-                try:
-                    weights = self.weight_net.predict(
-                        features,
-                        context,
-                    )
-                    self.weight_generator.set_runtime_weights(
-                        weights
-                    )
-                except Exception:
-                    pass
-            score = self.evaluator.evaluate(
-                features,
-                context,
-            ).score
-            
+            try:
+                score = self.board_evaluator.evaluate(
+                    state,
+                    me,
+                )
+            except Exception:
+                context = EvaluationContext(
+                    game_phase=(
+                        1.0
+                        - (
+                            features[1]
+                            + features[2]
+                        )
+                        / 12.0
+                    ),
+                    prize_diff=features[0],
+                    search_depth=self.max_depth,
+                    search_confidence=1.0,
+                    opponent_embedding=self.opponent_embedding,
+                )
+                if (
+                    self.use_weight_net
+                    and self.weight_net is not None
+                ):
+                    try:
+                        weights = self.weight_net.predict(
+                            features,
+                            context,
+                        )
+                        self.weight_generator.set_runtime_weights(
+                            weights
+                        )
+                    except Exception:
+                        pass
+                score = self.evaluator.evaluate(
+                    features,
+                    context,
+                ).score
         # Cache evaluation for this search.
         if key is not None:
             self.ctx.cache.evaluation[key] = score
