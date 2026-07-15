@@ -199,12 +199,32 @@ def _choose_main(obs_dict, select: Select, gd: GameData) -> int:
     }
     best_idx, best_score = 0, float("-inf")
     for opt in select.options:
-        s = _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd)
+        s = _score_main(
+            opt,
+            hand,
+            me,
+            state,
+            yi,
+            opp_hp,
+            bench_room,
+            ctx,
+            gd,
+        )
         if s > best_score:
             best_score, best_idx = s, opt.index
     return best_idx
 
-def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
+def _score_main(
+    opt,
+    hand,
+    me,
+    state,
+    yi,
+    opp_hp,
+    bench_room,
+    ctx,
+    gd,
+):
     t = opt.type
     w = WEIGHTS
     if t == OptionType.ATTACK:
@@ -226,6 +246,12 @@ def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
         # Include expected residual damage from Special Conditions (burn/poison).
         eff_dmg = dmg + gd.attack_effect_bonus(opt.attack_id)
         score = w["attack_base"] + eff_dmg * w["attack_dmg_scale"]
+        score += _future_attack_value(
+            opt.attack_id,
+            ctx["my_active"],
+            _active_pokemon(state, 1 - yi),
+            gd,
+        )
         # Prize-value bonus: targeting a high-prize active has intrinsic value
         # even without a KO (builds toward 2HKO on a Mega ex / ex).
         opp_pv = gd.prize_value(ctx["opp_active_id"])
@@ -297,6 +323,14 @@ def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
             # pattern where no attacker ever reached its attack cost).
             invested = len(target.get("energies") or [])
             score += invested * w["attach_concentrate"]
+        score += _future_value(
+            opt,
+            hand,
+            me,
+            state,
+            yi,
+            gd,
+        )
         return score
     if t == OptionType.PLAY:
         cid = _card_at(hand, opt.hand_index)
@@ -338,6 +372,127 @@ def _score_main(opt, hand, me, opp_hp, bench_room, ctx, gd: GameData) -> float:
     if t == OptionType.END:
         return w["end"]                   # only when nothing productive remains
     return 1
+
+def _future_value(
+    opt: Option,
+    hand: list,
+    me: dict,
+    state,
+    yi: int,
+    gd: GameData,
+) -> float:
+    """
+    One-ply board evaluation.
+    Simulate this action, then score the resulting board.
+    """
+    sim = _simulate_action(
+        opt,
+        hand,
+        me,
+        gd,
+    )
+    return _evaluate_board(
+        sim,
+        gd,
+    )
+
+def _future_attack_value(
+    attack_id: int,
+    my_active: dict | None,
+    opp_active: dict |None,
+    gd: GameData,
+) -> float:
+    """
+    Strategic value beyond immediate damage.
+
+    Rewards attacks that improve future board state, not just HP removal.
+    """
+
+    atk = gd.attack(attack_id)
+
+    if atk is None:
+        return 0.0
+
+    value = 0.0
+
+    # ------------------------
+    # Future KO pressure
+    # ------------------------
+    if my_active is not None and opp_active is not None:
+
+        hp = opp_active.get("hp") or 0
+
+        dmg = gd.effective_damage(
+            attacker_id=my_active.get("id"),
+            attack_id=attack_id,
+            base_dmg=atk.damage,
+            defender_id=opp_active.get("id"),
+        )
+
+        if hp > 0:
+
+            if dmg >= hp:
+                value += 90.0
+
+            elif dmg * 2 >= hp:
+                value += 38.0
+
+            elif dmg * 3 >= hp:
+                value += 14.0
+
+    # ------------------------
+    # Draw
+    # ------------------------
+    value += gd.attack_draw(attack_id) * 7.0
+
+    # ------------------------
+    # Healing
+    # ------------------------
+    value += gd.attack_heal(attack_id) * 0.45
+
+    # ------------------------
+    # Bench pressure
+    # ------------------------
+    bench = gd.attack_bench_damage(attack_id)
+
+    value += bench * 0.30
+
+    if gd.attack_spread(attack_id):
+        value += 22.0
+
+    # ------------------------
+    # Gust
+    # ------------------------
+    if gd.attack_gust(attack_id):
+        value += 55.0
+
+    # ------------------------
+    # Pivot attacks
+    # ------------------------
+    if gd.attack_switch(attack_id):
+        value += 25.0
+
+    # ------------------------
+    # Energy acceleration
+    # ------------------------
+    if gd.attack_energy_acceleration(attack_id):
+        value += 50.0
+
+    # ------------------------
+    # Energy denial
+    # ------------------------
+    if gd.attack_discards_opponent_energy(attack_id):
+        value += 35.0
+
+    if gd.attack_discards_self_energy(attack_id):
+        value -= 15.0
+
+    # ------------------------
+    # Status
+    # ------------------------
+    value += gd.attack_status_score(attack_id)
+
+    return value
 
 # ---------------------------------------------------------------------------
 # Card selections (setup / search / discard)
@@ -425,26 +580,52 @@ def _choose_cards(obs_dict, select: Select, gd: GameData) -> list[int]:
     k = max(select.min_count, min(k, n))
     return sorted(idx for _, idx in scored[:k])
 
-def _card_value(cid, gd: GameData) -> float:
+def _card_value(
+    cid,
+    gd: GameData,
+) -> float:
     if cid is None:
         return 1.0
+
     if gd.is_basic_pokemon(cid):
-        v = 100.0 + gd.best_damage(cid) * 0.1
-        return v + (30.0 if gd.is_ex(cid) else 0.0)
-    if gd.is_pokemon(cid):
-        # Non-basic (Stage 1 / Stage 2) Pokémon: give ex-evolutions proper weight.
-        # Mega Lucario ex (Stage 1, 270 dmg) must score above Riolu (106) in
-        # deck searches when we have Riolu on bench already.
-        v = 70.0
+        value = 100.0
+
+        value += gd.best_damage(cid) * 0.12
+
         if gd.is_ex(cid):
-            v += 30.0 + gd.best_damage(cid) * 0.1   # e.g. Mega Lucario ex → ~127
-        return v
+            value += 35.0
+
+        if gd.is_mega(cid):
+            value += 30.0
+
+        return value
+
+    if gd.is_pokemon(cid):
+        value = 75.0
+
+        value += gd.best_damage(cid) * 0.14
+
+        if gd.is_ex(cid):
+            value += 40.0
+
+        if gd.is_mega(cid):
+            value += 40.0
+
+        return value
+
     if gd.is_supporter(cid):
-        return 40.0
+        return 42.0
+
     if gd.is_item(cid):
+
+        if gd.is_dig_item(cid):
+            return 38.0
+
         return 30.0
+
     if gd.is_energy(cid):
-        return 15.0
+        return 16.0
+
     return 10.0
 
 # ---------------------------------------------------------------------------
@@ -495,6 +676,142 @@ def _attach_target(opt: Option, me: dict) -> dict | None:
         return arr[idx]
     return None
 
+def _clone_player(me: dict) -> dict:
+    """Cheap deep copy of only the player structure we mutate."""
+    import copy
+    return copy.deepcopy(me)
+
+def _simulate_attach(
+    opt: Option,
+    hand: list,
+    me: dict,
+    gd: GameData,
+) -> dict:
+    sim = _clone_player(me)
+    target = _attach_target(opt, sim)
+    if target is None:
+        return sim
+    cid = _card_at(hand, opt.hand_index)
+    energies = list(target.get("energies") or [])
+    provides = gd.energy_provides(cid)
+    if not provides:
+        provides = ["C"]
+    energies.append(
+        {
+            "id": cid,
+            "provides": provides,
+        }
+    )
+    target["energies"] = energies
+    return sim
+
+def _simulate_play_basic(
+    opt: Option,
+    hand: list,
+    me: dict,
+) -> dict:
+    sim = _clone_player(me)
+    cid = _card_at(hand, opt.hand_index)
+    if cid is None:
+        return sim
+    bench = sim.setdefault("bench", [])
+    if len(bench) >= 5:
+        return sim
+    bench.append(
+        {
+            "id": cid,
+            "energies": [],
+        }
+    )
+    return sim
+
+def _simulate_evolve(
+    opt: Option,
+    hand: list,
+    me: dict,
+) -> dict:
+    sim = _clone_player(me)
+    evo = _card_at(hand, opt.hand_index)
+    if evo is None:
+        return sim
+    target = _attach_target(opt, sim)
+    if target is None:
+        return sim
+    target["id"] = evo
+    return sim
+
+def _simulate_action(
+    opt: Option,
+    hand: list,
+    me: dict,
+    gd: GameData,
+) -> dict:
+    if opt.type == OptionType.ATTACH:
+        return _simulate_attach(opt, hand, me, gd)
+    if opt.type == OptionType.PLAY:
+        cid = _card_at(hand, opt.hand_index)
+        if gd.is_basic_pokemon(cid):
+            return _simulate_play_basic(opt, hand, me)
+        return me
+    if opt.type == OptionType.EVOLVE:
+        return _simulate_evolve(opt, hand, me)
+    return me
+
+def _evaluate_board(
+    me: dict,
+    gd: GameData,
+) -> float:
+    """
+    Evaluate a simulated board after one action.
+
+    Larger is better.
+    """
+    score = 0.0
+
+    # ---------- Active ----------
+    active = me.get("active") or []
+
+    if active:
+        p = active[0]
+
+        cid = p.get("id")
+        energies = p.get("energies") or []
+
+        best = gd.best_damage(cid)
+
+        score += best * 0.55
+
+        if not gd.needs_energy(cid, energies):
+            score += 220.0
+
+        score += len(energies) * 14.0
+
+        if gd.is_ex(cid):
+            score += 20.0
+
+    # ---------- Bench ----------
+    for p in me.get("bench") or []:
+
+        cid = p.get("id")
+        energies = p.get("energies") or []
+
+        best = gd.best_damage(cid)
+
+        score += best * 0.22
+
+        if not gd.needs_energy(cid, energies):
+            score += 90.0
+
+        score += len(energies) * 5.0
+
+        if gd.is_ex(cid):
+            score += 8.0
+
+    # Slight reward for wider board.
+    score += len(me.get("bench") or []) * 12.0
+
+    return score
+
 # ---------------------------------------------------------------------------
 # Threat model / board reading (for the danger-aware features)
 # ---------------------------------------------------------------------------
@@ -504,25 +821,57 @@ def _active_pokemon(state, pi):
 def _active_card_id(state, pi):
     return active_card_id(state, pi)
 
-def _best_affordable_damage(pkmn: dict | None, gd: GameData, defender: dict | None = None) -> int:
-    """Highest damage among the attacks ``pkmn`` can currently pay for.
-    When ``defender`` is given, damage is Weakness/Resistance-adjusted for that
-    defender (used by the threat model and gust targeting).
+def _best_affordable_damage(
+    pkmn: dict | None,
+    gd: GameData,
+    defender: dict | None = None,
+) -> int:
     """
+    Highest effective damage currently available.
+
+    Includes attack-effect bonus so tactical attacks compete fairly with
+    raw-damage attacks.
+    """
+
     if not isinstance(pkmn, dict):
         return 0
+
     cid = pkmn.get("id")
+
     if cid is None:
         return 0
+
     attached = pkmn.get("energies") or []
-    def_id = defender.get("id") if isinstance(defender, dict) else None
+
+    defender_id = (
+        defender.get("id")
+        if isinstance(defender, dict)
+        else None
+    )
+
     best = 0
-    for aid in gd.card_attacks.get(cid, []):
-        if gd.can_pay(gd.attack_cost(aid), attached):
-            dmg = gd.attack_damage(aid)
-            if def_id is not None:
-                dmg = gd.effective_damage(cid, dmg, def_id)
-            best = max(best, dmg)
+
+    for attack_id in gd.card_attacks.get(cid, ()):
+
+        cost = gd.attack_cost(attack_id)
+
+        if not gd.can_pay(cost, attached):
+            continue
+
+        dmg = gd.attack_damage(attack_id)
+
+        if defender_id is not None:
+            dmg = gd.effective_damage(
+                cid,
+                dmg,
+                defender_id,
+            )
+
+        dmg += gd.attack_effect_bonus(attack_id)
+
+        if dmg > best:
+            best = dmg
+
     return best
 
 def _in_danger(state, yi, gd: GameData) -> bool:
@@ -588,23 +937,56 @@ def _choose_gust_target(select: Select, state, yi, gd: GameData) -> list[int]:
     k = min(k, select.max_count or k, n)
     return sorted(idx for _, idx in scored[:k])
 
-def _gust_value(target: dict | None, my_active: dict | None, gd: GameData) -> float:
+def _gust_value(
+    target: dict | None,
+    my_active: dict | None,
+    gd: GameData,
+) -> float:
+    """
+    Score an opponent Pokémon for gust effects.
+
+    Priorities:
+
+        1. Immediate KO
+        2. Prize value
+        3. Damage output
+        4. Lowest remaining HP
+    """
+
     if not isinstance(target, dict):
         return 0.0
+
     hp = target.get("hp") or 0
     cid = target.get("id")
-    # Weakness-adjusted: a target weak to our type may be KO-able even if its raw
-    # HP exceeds our printed damage.
-    my_dmg = _best_affordable_damage(my_active, gd, defender=target)
-    v = 0.0
-    if 0 < hp <= my_dmg:
-        v += WEIGHTS["gust_ko"]   # we can KO it now for a Prize
-        v -= hp * 0.1             # among KO-able, take the easiest
+
+    my_dmg = _best_affordable_damage(
+        my_active,
+        gd,
+        defender=target,
+    )
+
+    value = 0.0
+
+    prize = gd.prize_value(cid)
+
+    if hp > 0 and my_dmg >= hp:
+        value += WEIGHTS["gust_ko"]
+        value += prize * 80.0
+
     else:
-        v -= hp * 0.05            # otherwise prefer the softest target
-    if gd.is_ex(cid):
-        v += WEIGHTS["gust_ex"]   # ex = 2 Prizes
-    return v
+        value += prize * 35.0
+
+    value += gd.best_damage(cid) * 0.18
+
+    value -= hp * 0.05
+
+    if gd.is_mega(cid):
+        value += WEIGHTS["gust_mega_ex"]
+
+    elif gd.is_ex(cid):
+        value += WEIGHTS["gust_ex"]
+
+    return value
 
 def _hand(state, yi):
     return hand(state, yi)
@@ -662,15 +1044,40 @@ def _can_attack(pkmn: dict, gd: GameData) -> bool:
             return True
     return False
 
-def _powered_switch_value(pkmn: dict, gd: GameData) -> float:
+def _powered_switch_value(
+    pkmn: dict,
+    gd: GameData,
+) -> float:
+    """
+    Score a Pokémon as a switch target.
+
+    Priorities:
+
+      1. Already able to attack
+      2. High damage
+      3. Healthy
+      4. Already has energy
+    """
+
     hp = pkmn.get("hp") or 0
     cid = pkmn.get("id")
-    best_dmg = gd.best_damage(cid)
     energies = pkmn.get("energies") or []
+
+    damage = gd.best_damage(cid)
+
+    value = damage * 0.30
+
     if _can_attack(pkmn, gd):
-        return 120.0 + best_dmg * 0.3
-    # cold ones
-    val = len(energies) * 15.0
-    if hp > 0 and hp < 40:
-        val -= 40.0
-    return val
+        value += 150.0
+
+    value += len(energies) * 15.0
+
+    value += min(hp, 220) * 0.08
+
+    if gd.is_ex(cid):
+        value += 15.0
+
+    if hp <= 40:
+        value -= 45.0
+
+    return value

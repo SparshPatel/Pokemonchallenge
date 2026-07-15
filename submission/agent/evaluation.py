@@ -256,25 +256,104 @@ class Evaluator:
             features,
             context,
         )
+
         score = 0.0
         contributions = {}
+
         for feature, value in features.items():
-            contribution = (
-                value *
-                weights.get(feature, 0.0)
-            )
+            w = weights.get(feature, 0.0)
+            contribution = value * w
             contributions[feature] = contribution
             score += contribution
-        # Record this state for later TD learning.
+
+        # -----------------------------
+        # Synergy bonuses
+        # -----------------------------
+
+        # Ready attacker with energy lead.
+        score += (
+            features.get("attack_ready", 0.0)
+            * features.get("energy_advantage", 0.0)
+            * 0.40
+        )
+
+        # Strong board with setup.
+        score += (
+            features.get("board_control", 0.0)
+            * features.get("bench_ready_frac", 0.0)
+            * 0.25
+        )
+
+        # Prize race acceleration.
+        score += (
+            features.get("prize_diff", 0.0)
+            * features.get("tempo", 0.0)
+            * 0.30
+        )
+
+        # Convert setup into aggression.
+        score += (
+            features.get("setup_ko", 0.0)
+            * features.get("attack_ready", 0.0)
+            * 0.45
+        )
+
+        # -----------------------------
+        # Penalties
+        # -----------------------------
+
+        # Lots of energy but no attacker.
+        if (
+            features.get("energy_advantage", 0.0) > 0.5
+            and features.get("attack_ready", 0.0) < 0.2
+        ):
+            score -= 0.35
+
+        # Weak active while behind.
+        if (
+            features.get("my_active_hpfrac", 0.0) < 0.30
+            and features.get("prize_diff", 0.0) < 0.0
+        ):
+            score -= 0.45
+
+        # Empty bench.
+        if (
+            features.get("bench_frac", 0.0) < 0.20
+        ):
+            score -= 0.20
+
+        # -----------------------------
+        # Endgame scaling
+        # -----------------------------
+
+        phase = max(0.0, min(1.0, context.game_phase))
+
+        score += (
+            features.get("setup_ko", 0.0)
+            * phase
+            * 0.30
+        )
+
+        score += (
+            features.get("prize_diff", 0.0)
+            * phase
+            * 0.20
+        )
+
+        # -----------------------------
+        # Record for online learner
+        # -----------------------------
+
         if self.learner is not None:
             self.learner.record(
                 features=features,
                 predicted_value=score,
                 context=context,
             )
+
         return EvaluationResult(
             score=score,
             feature_scores=contributions,
             weights=weights,
             uncertainty=0.0,
-        )                
+        )

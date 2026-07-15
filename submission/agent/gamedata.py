@@ -28,15 +28,59 @@ _BURN_RESIDUAL = 20
 _POISON_RESIDUAL = 10
 
 class _Attack:
-    __slots__ = ("attack_id", "name", "damage", "energies", "effect_bonus")
-
-    def __init__(self, attack_id: int, name: str, damage: int, energies: list[int],
-                 effect_bonus: int = 0):
+    __slots__ = (
+        "attack_id",
+        "name",
+        "text",
+        "damage",
+        "energies",
+        "effect_bonus",
+        "draw",
+        "heal",
+        "self_damage",
+        "bench_damage",
+        "gust",
+        "switch",
+        "energy_acceleration",
+        "energy_discard_self",
+        "energy_discard_opponent",
+        "spread",
+        "status_burn",
+        "status_poison",
+        "status_paralyze",
+        "status_confuse",
+        "status_sleep",
+    )
+    def __init__(
+        self,
+        attack_id: int,
+        name: str,
+        damage: int,
+        energies: list[int],
+        effect_bonus: int = 0,
+        text: str = "",
+    ):
         self.attack_id = attack_id
         self.name = name
         self.damage = damage
         self.energies = energies
         self.effect_bonus = effect_bonus
+        self.text = text.lower()
+        self.draw = 0
+        self.heal = 0
+        self.self_damage = 0
+        self.bench_damage = 0
+        self.gust = False
+        self.switch = False
+        self.energy_acceleration = False
+        self.energy_discard_self = False
+        self.energy_discard_opponent = False
+        self.spread = False
+        self.status_burn = False
+        self.status_poison = False
+        self.status_paralyze = False
+        self.status_confuse = False
+        self.status_sleep = False
 
 
 class GameData:
@@ -85,24 +129,99 @@ class GameData:
         
     def _load_engine(self, api) -> None:
         """
-        Original cg.api loader.
-        Kept separate so the loader can fall back to cards.json when cg.api is
-        unavailable.
+        Load runtime card and attack metadata from cg.api.
+        Besides raw damage/costs we also extract lightweight tactical metadata
+        from attack text so later evaluation does not need to repeatedly parse
+        natural language.
         """
+        import re
+        draw_re = re.compile(r"draw\s+(\d+)\s+card")
+        heal_re = re.compile(r"heal\s+(\d+)")
+        bench_re = re.compile(r"(\d+)\s+damage.*bench")
         for a in api.all_attack():
-            text = (getattr(a, "text", "") or "").lower()
+            text = (getattr(a, "text", "") or "")
+            lower = text.lower()
             bonus = 0
-            if "burned" in text:
+            if "burned" in lower:
                 bonus += _BURN_RESIDUAL
-            if "poisoned" in text:
+            if "poisoned" in lower:
                 bonus += _POISON_RESIDUAL
-            self.attacks[a.attackId] = _Attack(
-                a.attackId,
-                a.name,
-                int(a.damage or 0),
-                [int(e) for e in (a.energies or [])],
-                bonus,
+            atk = _Attack(
+                attack_id=a.attackId,
+                name=a.name,
+                damage=int(a.damage or 0),
+                energies=[int(e) for e in (a.energies or [])],
+                effect_bonus=bonus,
+                text=text,
             )
+            # -------------------------
+            # Status conditions
+            # -------------------------
+            atk.status_burn = "burned" in lower
+            atk.status_poison = "poisoned" in lower
+            atk.status_paralyze = "paralyzed" in lower
+            atk.status_confuse = "confused" in lower
+            atk.status_sleep = "asleep" in lower
+            # -------------------------
+            # Draw
+            # -------------------------
+            m = draw_re.search(lower)
+            if m:
+                atk.draw = int(m.group(1))
+            # -------------------------
+            # Healing
+            # -------------------------
+            m = heal_re.search(lower)
+            if m:
+                atk.heal = int(m.group(1))
+            # -------------------------
+            # Bench damage
+            # -------------------------
+            m = bench_re.search(lower)
+            if m:
+                atk.bench_damage = int(m.group(1))
+                atk.spread = True
+            # -------------------------
+            # Gust
+            # -------------------------
+            if (
+                "switch your opponent's active" in lower
+                or "choose 1 of your opponent's benched" in lower
+            ):
+                atk.gust = True
+            # -------------------------
+            # Self switching
+            # -------------------------
+            if (
+                "switch this pokémon" in lower
+                or "switch this pokemon" in lower
+                or "switch your active" in lower
+            ):
+                atk.switch = True
+            # -------------------------
+            # Energy acceleration
+            # -------------------------
+            if (
+                "attach" in lower
+                and "energy" in lower
+            ):
+                atk.energy_acceleration = True
+            # -------------------------
+            # Energy discard
+            # -------------------------
+            if (
+                "discard an energy from this pokémon" in lower
+                or "discard an energy from this pokemon" in lower
+                or "discard all energy from this pokémon" in lower
+                or "discard all energy from this pokemon" in lower
+            ):
+                atk.energy_discard_self = True
+            if (
+                "discard an energy from your opponent" in lower
+                or "discard an energy attached to your opponent" in lower
+            ):
+                atk.energy_discard_opponent = True
+            self.attacks[a.attackId] = atk
         for c in api.all_card_data():
             cid = c.cardId
             self.card_type[cid] = int(c.cardType)
@@ -131,9 +250,12 @@ class GameData:
             for aid in (c.attacks or []):
                 atk = self.attacks.get(aid)
                 if atk:
-                    dmg = max(dmg, atk.damage)
+                    dmg = max(
+                        dmg,
+                        atk.damage,
+                    )
             self.card_best_damage[cid] = dmg
-            
+
     def _load_cards_json(self) -> None:
         """
         Lightweight offline fallback.
@@ -212,22 +334,157 @@ class GameData:
         return 1
 
     def attack_effect_bonus(self, attack_id: int | None) -> int:
-        """Expected residual damage (HP) from an attack's Special Condition.
-        Burned ~20/checkup, Poisoned ~10/checkup. A one-turn estimate used to
-        value condition-inflicting attacks; never counted toward immediate lethal
-        (these resolve between turns, after the opponent may retreat/heal).
         """
-        atk = self.attacks.get(attack_id) if attack_id is not None else None
-        return atk.effect_bonus if atk else 0
+        Expected value from attack effects.
+
+        Residual damage is already included here.
+        """
+        atk = self.attack(attack_id)
+        if atk is None:
+            return 0
+
+        bonus = atk.effect_bonus
+
+        if atk.gust:
+            bonus += 20
+
+        if atk.energy_acceleration:
+            bonus += 25
+
+        if atk.energy_discard_opponent:
+            bonus += 18
+
+        if atk.heal:
+            bonus += min(20, atk.heal // 2)
+
+        return bonus
 
     def attack_damage(self, attack_id: int | None) -> int:
         atk = self.attacks.get(attack_id) if attack_id is not None else None
         return atk.damage if atk else 0
+    
+    def attack(self, attack_id: int | None) -> _Attack | None:
+        if attack_id is None:
+            return None
+        return self.attacks.get(attack_id)
+
+    def attack_draw(self, attack_id: int | None) -> int:
+        atk = self.attack(attack_id)
+        return atk.draw if atk else 0
+
+    def attack_heal(self, attack_id: int | None) -> int:
+        atk = self.attack(attack_id)
+        return atk.heal if atk else 0
+
+    def attack_bench_damage(self, attack_id: int | None) -> int:
+        atk = self.attack(attack_id)
+        return atk.bench_damage if atk else 0
+
+    def attack_spread(self, attack_id: int | None) -> bool:
+        atk = self.attack(attack_id)
+        return atk.spread if atk else False
+
+    def attack_gust(self, attack_id: int | None) -> bool:
+        atk = self.attack(attack_id)
+        return atk.gust if atk else False
+
+    def attack_switch(self, attack_id: int | None) -> bool:
+        atk = self.attack(attack_id)
+        return atk.switch if atk else False
+
+    def attack_energy_acceleration(self, attack_id: int | None) -> bool:
+        atk = self.attack(attack_id)
+        return atk.energy_acceleration if atk else False
+
+    def attack_discards_self_energy(self, attack_id: int | None) -> bool:
+        atk = self.attack(attack_id)
+        return atk.energy_discard_self if atk else False
+
+    def attack_discards_opponent_energy(self, attack_id: int | None) -> bool:
+        atk = self.attack(attack_id)
+        return atk.energy_discard_opponent if atk else False
+
+    def attack_status_score(self, attack_id: int | None) -> int:
+        atk = self.attack(attack_id)
+        if atk is None:
+            return 0
+        score = 0
+        if atk.status_burn:
+            score += 15
+        if atk.status_poison:
+            score += 18
+        if atk.status_paralyze:
+            score += 40
+        if atk.status_sleep:
+            score += 15
+        if atk.status_confuse:
+            score += 20
+        return score
+    
+    def attack_utility_score(
+        self,
+        attack_id: int | None,
+    ) -> int:
+        """
+        Overall tactical value of an attack independent of raw damage.
+
+        This is intentionally conservative. Damage is evaluated elsewhere;
+        this only rewards secondary effects that often win games.
+        """
+        atk = self.attack(attack_id)
+
+        if atk is None:
+            return 0
+
+        score = 0
+
+        score += atk.draw * 5
+        score += atk.heal // 10
+        score += atk.bench_damage // 10
+
+        if atk.gust:
+            score += 35
+
+        if atk.switch:
+            score += 15
+
+        if atk.energy_acceleration:
+            score += 30
+
+        if atk.energy_discard_opponent:
+            score += 25
+
+        if atk.energy_discard_self:
+            score -= 15
+
+        score += self.attack_status_score(attack_id)
+
+        return score
 
     def best_damage(self, card_id: int | None) -> int:
+        """
+        Best realistic damage this Pokémon can produce.
+
+        Includes attack-effect bonus so evaluation prefers attacks that
+        deal less immediate damage but produce stronger board impact.
+        """
         if card_id is None:
             return 0
-        return self.card_best_damage.get(card_id, 0)
+
+        best = 0
+
+        for aid in self.card_attacks.get(card_id, ()):
+
+            atk = self.attack(aid)
+            if atk is None:
+                continue
+
+            dmg = atk.damage + self.attack_effect_bonus(aid)
+
+            if dmg > best:
+                best = dmg
+
+        return best
 
     # --- weakness / resistance reasoning ---------------------------------
     def energy_type(self, card_id: int | None) -> int | None:
@@ -236,26 +493,51 @@ class GameData:
         return self.card_energy_type.get(card_id)
 
     def effective_damage(
-        self, attacker_id: int | None, base_dmg: int, defender_id: int | None
+        self,
+        attacker_id: int | None,
+        attack_id: int | None,
+        base_dmg: int,
+        defender_id: int | None,
     ) -> int:
-        """Damage ``attacker_id`` deals to the Active ``defender_id``.
-        Applies Weakness (×2) and Resistance (flat −) per the rulebook, matched
-        against the *attacker's* Pokémon type. Degrades to ``base_dmg`` when type
-        data is missing. Only meaningful for the Active Spot (callers ensure the
-        defender is/will be Active).
+        """
+        True runtime damage estimate.
+
+        Applies:
+            • Weakness
+            • Resistance
+            • Mad Bite scaling
+            • attack effect bonus
+
+        Never crashes.
         """
         if base_dmg <= 0:
             return base_dmg
-        atk_type = self.card_energy_type.get(attacker_id) if attacker_id is not None else None
-        if atk_type is None or defender_id is None:
-            return base_dmg
-        dmg = float(base_dmg)
-        if self.card_weakness.get(defender_id) == atk_type:
-            dmg *= WEAKNESS_MULT
-        if self.card_resistance.get(defender_id) == atk_type:
-            dmg -= RESISTANCE_FLAT
-        return max(0, int(dmg))
 
+        dmg = base_dmg
+
+        atk = self.attack(attack_id)
+        if atk is not None:
+            # Bloodmoon Ursaluna — Mad Bite
+            if atk.attack_id == 175:
+                dmg = max(dmg, 100)
+
+        atk_type = (
+            self.card_energy_type.get(attacker_id)
+            if attacker_id is not None
+            else None
+        )
+
+        if atk_type is not None and defender_id is not None:
+            if self.card_weakness.get(defender_id) == atk_type:
+                dmg *= WEAKNESS_MULT
+
+            if self.card_resistance.get(defender_id) == atk_type:
+                dmg -= RESISTANCE_FLAT
+
+        dmg += self.attack_effect_bonus(attack_id)
+
+        return max(0, int(dmg))
+    
     def is_dig_item(self, card_id: int | None) -> bool:
         return card_id in self.is_dig_item_id
 

@@ -23,34 +23,61 @@ except Exception:  # pragma: no cover - numpy is available in the sim image
     np = None
 # Ordered feature names — the training pipeline MUST emit vectors in this order.
 FEATURE_NAMES = (
-    "prize_diff",        # (opp_left - my_left) / 6, in [-1, 1]
-    "my_prize_left",     # my_left / 6
-    "opp_prize_left",    # opp_left / 6
-    "my_active_hpfrac",  # my active hp / maxHp, 0 if none
-    "opp_active_hpfrac", # opp active hp / maxHp, 0 if none
-    "opp_active_dmgfrac",# (maxHp-hp)/maxHp on opp active
-    "my_ready",          # 1 if our active can attack now
-    "setup_ko",          # 1 if our affordable dmg >= opp active hp
-    "opp_threat",        # 1 if opp affordable dmg >= our active hp
-    "active_quality",    # active best_dmg / our best available best_dmg
-    "active_loaded",     # active affordable_dmg / active best_dmg
-    "bench_frac",        # our bench count / 5
-    "bench_ready_frac",  # our bench-ready count / 5
-    "energy_frac",       # our energy in play / 12 (soft cap)
-    "hand_frac",         # our hand count / 10 (soft cap)
-    "opp_bench_dmg",     # sum over opp bench of (maxHp-hp)/maxHp * prize_value, /5
-    "bench_setup_ko",    # count opp bench we can KO now (after gust), /5
-    "no_active",         # 1 if we have no active (very bad)
-    "bias",              # constant 1.0
+    # ----------------------------
+    # Prize state
+    # ----------------------------
+    "prize_diff",
+    "my_prize_left",
+    "opp_prize_left",
+    # ----------------------------
+    # Active Pokémon
+    # ----------------------------
+    "my_active_hpfrac",
+    "opp_active_hpfrac",
+    "opp_active_dmgfrac",
+    "my_ready",
+    "setup_ko",
+    "opp_threat",
+    "active_quality",
+    "active_loaded",
+    # ----------------------------
+    # Bench
+    # ----------------------------
+    "bench_frac",
+    "bench_ready_frac",
+    "bench_setup_ko",
+    "opp_bench_dmg",
+    # ----------------------------
+    # Resources
+    # ----------------------------
+    "energy_frac",
+    "hand_frac",
+    # ----------------------------
+    # Tempo
+    # ----------------------------
+    "my_can_attack",
+    "opp_can_attack",
+    "energy_advantage",
+    "board_control",
+    "supporter_available",
+    "gust_available",
+    "switch_available",
+    "stadium_in_play",
+    # ----------------------------
+    # Risk
+    # ----------------------------
+    "multi_prize_risk",
+    "bench_liability",
+    "no_active",
+    "bias",
 )
 N_FEATURES = len(FEATURE_NAMES)
 
 def extract_features(state, me, gd, helpers):
-    """Return a length-N_FEATURES python list of floats for ``state`` from
-    player ``me``'s perspective.
-    ``helpers`` is a namespace/module exposing the planner primitives so this
-    module has no import cycle with planner.py: ``_active``, ``_prizes_left``,
-    ``_best_affordable_dmg``, ``_can_attack``, ``_energy_in_play``.
+    """
+    Extract normalized board features.
+    Values are intentionally smooth and normalized so the network
+    generalizes well between different board states.
     """
     players = state.get("players") or []
     if len(players) < 2:
@@ -62,66 +89,207 @@ def extract_features(state, me, gd, helpers):
     my_act = helpers._active(mp)
     opp_act = helpers._active(op)
     f = {k: 0.0 for k in FEATURE_NAMES}
+    # Convenience references
+    my_bench = list(mp.get("bench") or [])
+    opp_bench = list(op.get("bench") or [])
+    my_energy = helpers._energy_in_play(mp)
+    opp_energy = helpers._energy_in_play(op)
+    # ----------------------------------------------------------
+    # Prize race
+    # ----------------------------------------------------------
     f["prize_diff"] = (opp_left - my_left) / 6.0
     f["my_prize_left"] = my_left / 6.0
     f["opp_prize_left"] = opp_left / 6.0
-    if opp_act:
-        omax = opp_act.get("maxHp") or 0
-        ohp = opp_act.get("hp") or 0
-        if omax > 0:
-            f["opp_active_hpfrac"] = ohp / omax
-            f["opp_active_dmgfrac"] = (omax - ohp) / omax
-        if my_act and ohp > 0:
-            dmg = helpers._best_affordable_dmg(my_act, opp_act, gd)
-            if dmg >= ohp:
-                f["setup_ko"] = 1.0
+    # ----------------------------------------------------------
+    # Active Pokémon
+    # ----------------------------------------------------------
     if my_act:
-        mmax = my_act.get("maxHp") or 0
         mhp = my_act.get("hp") or 0
+        mmax = my_act.get("maxHp") or 0
         if mmax > 0:
             f["my_active_hpfrac"] = mhp / mmax
         if helpers._can_attack(my_act, gd):
             f["my_ready"] = 1.0
-        if opp_act and mhp > 0:
-            othreat = helpers._best_affordable_dmg(opp_act, my_act, gd)
-            if othreat >= mhp:
-                f["opp_threat"] = 1.0
-        best_pot = 0
-        for p in [my_act] + list(mp.get("bench") or []):
-            if isinstance(p, dict):
-                best_pot = max(best_pot, gd.best_damage(p.get("id")))
-        act_pot = gd.best_damage(my_act.get("id"))
-        if best_pot > 0:
-            f["active_quality"] = act_pot / best_pot
-        if act_pot > 0:
-            aff = helpers._best_affordable_dmg(my_act, opp_act or {}, gd)
-            f["active_loaded"] = min(aff / act_pot, 1.0)
     else:
         f["no_active"] = 1.0
+    if opp_act:
+        ohp = opp_act.get("hp") or 0
+        omax = opp_act.get("maxHp") or 0
+        if omax > 0:
+            f["opp_active_hpfrac"] = ohp / omax
+            f["opp_active_dmgfrac"] = (omax - ohp) / omax
+    # ----------------------------------------------------------
+    # KO / threat
+    # ----------------------------------------------------------
+    if my_act and opp_act:
+        my_dmg = helpers._best_affordable_dmg(
+            my_act,
+            opp_act,
+            gd,
+        )
+        if my_dmg >= (opp_act.get("hp") or 0):
+            f["setup_ko"] = 1.0
+        opp_dmg = helpers._best_affordable_dmg(
+            opp_act,
+            my_act,
+            gd,
+        )
+        if opp_dmg >= (my_act.get("hp") or 0):
+            f["opp_threat"] = 1.0
+    # ----------------------------------------------------------
+    # Active quality
+    # ----------------------------------------------------------
+    if my_act:
+        team_best = 0
+        for p in [my_act] + list(mp.get("bench") or []):
+            if isinstance(p, dict):
+                team_best = max(
+                    team_best,
+                    gd.best_damage(p.get("id")),
+                )
+        active_best = gd.best_damage(my_act.get("id"))
+        if team_best > 0:
+            f["active_quality"] = active_best / team_best
+        if active_best > 0 and opp_act:
+            affordable = helpers._best_affordable_dmg(
+                my_act,
+                opp_act,
+                gd,
+            )
+            f["active_loaded"] = min(
+                affordable / active_best,
+                1.0,
+            )
+    # ----------------------------------------------------------
+    # Bench
+    # ----------------------------------------------------------
     bench = list(mp.get("bench") or [])
-    f["bench_frac"] = min(len(bench), 5) / 5.0
-    ready = sum(1 for bp in bench if isinstance(bp, dict) and helpers._can_attack(bp, gd))
-    f["bench_ready_frac"] = min(ready, 5) / 5.0
-    f["energy_frac"] = min(helpers._energy_in_play(mp), 12) / 12.0
-    f["hand_frac"] = min(int(mp.get("handCount") or 0), 10) / 10.0
-    ob_dmg = 0.0
-    ko_ct = 0
-    for bp in (op.get("bench") or []):
-        if not isinstance(bp, dict):
-            continue
-        omax = bp.get("maxHp") or 0
-        ohp = bp.get("hp") or 0
-        pv = gd.prize_value(bp.get("id"))
-        if omax > 0 and ohp < omax:
-            ob_dmg += ((omax - ohp) / omax) * pv
-        if my_act and 0 < ohp:
-            if helpers._best_affordable_dmg(my_act, bp, gd) >= ohp:
-                ko_ct += 1
-    f["opp_bench_dmg"] = min(ob_dmg, 5.0) / 5.0
-    f["bench_setup_ko"] = min(ko_ct, 5) / 5.0
-    f["bias"] = 1.0
-    return [f[k] for k in FEATURE_NAMES]
+    f["bench_frac"] = min(
+        len(bench),
+        5,
+    ) / 5.0
+    ready = 0
+    for bp in bench:
+        if isinstance(bp, dict) and helpers._can_attack(bp, gd):
+            ready += 1
+    f["bench_ready_frac"] = min(
+        ready,
+        5,
+    ) / 5.0
+    # ----------------------------------------------------------
+    # Energy
+    # ----------------------------------------------------------
+    f["energy_frac"] = min(
+        helpers._energy_in_play(mp),
+        12,
+    ) / 12.0
+    # Tempo features
+    f["my_can_attack"] = 1.0 if (
+        my_act and helpers._can_attack(my_act, gd)
+    ) else 0.0
+    f["opp_can_attack"] = 1.0 if (
+        opp_act and helpers._can_attack(opp_act, gd)
+    ) else 0.0
+    f["energy_advantage"] = (
+        my_energy - opp_energy
+    ) / 12.0
+    my_board = len(my_bench)
+    opp_board = len(opp_bench)
+    f["board_control"] = (
+        (my_board - opp_board)
+        / 5.0
+    )
+    # ----------------------------------------------------------
+    # Hand
+    # ----------------------------------------------------------
+    hand_count = int(mp.get("handCount") or 0)
+    f["hand_frac"] = min(
+        hand_count,
+        10,
+    ) / 10.0
+    # Trainer availability
+    hand_cards = mp.get("hand") or []
+    supporter = 0
+    gust = 0
+    switch = 0
+    for card in hand_cards:
+        cid = card.get("id")
+        if gd.is_supporter(cid):
+            supporter = 1
+        name = (
+            gd.card_name.get(cid, "")
+            .lower()
+        )
+        if (
+            "boss" in name
+            or "catcher" in name
+        ):
+            gust = 1
 
+        if "switch" in name:
+            switch = 1
+    f["supporter_available"] = supporter
+    f["gust_available"] = gust
+    f["switch_available"] = switch
+    # ----------------------------------------------------------
+    # Opponent bench pressure
+    # ----------------------------------------------------------
+    bench_damage = 0.0
+    bench_kos = 0
+    if my_act:
+        for bp in (op.get("bench") or []):
+            if not isinstance(bp, dict):
+                continue
+            hp = bp.get("hp") or 0
+            max_hp = bp.get("maxHp") or 0
+            if max_hp > 0:
+                bench_damage += (
+                    (max_hp - hp)
+                    / max_hp
+                ) * gd.prize_value(bp.get("id"))
+            if hp > 0:
+                dmg = helpers._best_affordable_dmg(
+                    my_act,
+                    bp,
+                    gd,
+                )
+                if dmg >= hp:
+                    bench_kos += 1
+    f["opp_bench_dmg"] = min(
+        bench_damage,
+        5.0,
+    ) / 5.0
+    f["bench_setup_ko"] = min(
+        bench_kos,
+        5,
+    ) / 5.0
+    # ----------------------------------------------------------
+    # Bias
+    # ----------------------------------------------------------
+    f["bias"] = 1.0
+    # Stadium
+    f["stadium_in_play"] = (
+        1.0
+        if state.get("stadium")
+        else 0.0
+    )
+    # Multi-prize risk
+    risk = 0
+    for p in [my_act] + my_bench:
+        if not isinstance(p, dict):
+            continue
+        risk += gd.prize_value(
+            p.get("id")
+        )
+    f["multi_prize_risk"] = risk / 10.0
+    # Bench liability
+    liability = 0
+    for p in my_bench:
+        hp = p.get("hp", 0)
+        if hp < 90:
+            liability += 1
+    f["bench_liability"] = liability / 5.0
+    return [f[name] for name in FEATURE_NAMES]
 class ValueNet:
     """
     CPU-only value function.
@@ -237,9 +405,9 @@ class ValueNet:
         feats,
     ):
         """
-        Returns the estimated probability of eventually winning.
-        If no trained model is available, return a neutral estimate.
-        The planner is responsible for invoking the heuristic fallback.
+        Returns a calibrated win probability.
+        The raw network output is temperature-scaled so that values are
+        less overconfident and produce smoother gradients for search.
         """
         if not self.available:
             return 0.5
@@ -258,15 +426,32 @@ class ValueNet:
             z = float(
                 h @ self._W2 + self._b2
             )
-        # Online calibration bias
         z += self.bias
+        # ---------- temperature scaling ----------
+        temperature = 1.5
+        z /= temperature
+        # ---------- numerical stability ----------
+        z = max(
+            min(z, 20.0),
+            -20.0,
+        )
         if z >= 0:
             return 1.0 / (
-                1.0 +
-                np.exp(-z)
+                1.0 + np.exp(-z)
             )
         e = np.exp(z)
         return e / (1.0 + e)
+
+    def evaluate(
+        self,
+        feats,
+    ):
+        """
+        Planner-friendly evaluation.
+        Returns a symmetric value in [-1, 1] instead of a probability.
+        """
+        p = self.predict(feats)
+        return (2.0 * p) - 1.0
     
     # -------------------------------------------------------------
     def calibrate(

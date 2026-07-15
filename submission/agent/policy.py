@@ -208,14 +208,41 @@ class Policy:
                 self.gamedata,
             )
         # Final legality guard.
+        # ----------------------------------------------------------
+        # Final supervisor pass.
+        #
+        # The planner has already searched.
+        # Rules have already produced a fallback.
+        #
+        # The supervisor is now allowed to:
+        #
+        #   • force tactical wins
+        #   • prevent obvious blunders
+        #   • apply strategic overrides
+        #
+        # It never searches.
+        # ----------------------------------------------------------
+
         if (
             self.enable_supervisor
             and select.select_type == SelectType.MAIN
         ):
+
             choice = supervisor.guard_main(
                 obs_dict,
                 select,
                 self.gamedata,
                 choice,
             )
+
+            strategic = supervisor.strategic_override(
+                obs_dict,
+                select,
+                self.gamedata,
+                choice,
+            )
+
+            if strategic is not None:
+                choice = strategic
+
         return choice

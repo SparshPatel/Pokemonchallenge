@@ -1,227 +1,150 @@
-"""Within-turn lookahead planner via the cabt persistent search tree.
-The shipped :mod:`agent.rules` policy scores each option *in isolation* and plays
-greedily, one micro-decision at a time. It cannot answer questions of the form
-"if I play this Ball, fetch Riolu, evolve, attach, and *then* attack, do I win
-the race?" — it just takes the highest-scored single option and hopes the rest of
-the turn works out.
-``TurnPlanner`` closes that gap. At one of our MAIN decisions it:
-1. **Determinizes** the hidden state — our own face-down deck/prizes are
-   reconstructed accurately from the known 60-card list; the opponent is filled
-   from a belief archetype (mirror by default). Our-turn simulation depends
-   mostly on *our* deck, which we know, so the determinization is high quality
-   for the thing we are optimizing.
-2. Opens a real engine search with ``search_begin`` and **branches** over our
-   successive MAIN actions using ``search_step`` (the engine exposes a persistent
-   search tree: every ``search_step`` returns a fresh ``searchId`` from its
-   parent, so sibling actions can be explored from the same node). Forced
-   sub-selections in between (which card to fetch/discard) are resolved with the
-   rule policy.
-3. Evaluates the **end-of-turn board** with a deck-aware value function (prize
-   race, damage on the defender, set-up KOs, our attacker's readiness and
-   safety) rather than a hand-tuned per-option proxy.
-It is **anytime and self-limiting** (wall-clock deadline + node budget) and
-**crash-safe**: any engine error or exhausted budget falls back to the rule
-policy, and the search context is always torn down in a ``finally``. It is opt-in
-via ``PTCG_ENABLE_PLANNER=1`` until it is proven to beat rules in the gauntlet.
+"""
+planner.py
+Lightweight orchestration layer.
+All search logic has been moved into:
+    determinization.py
+    search_tree.py
+    search_expansion.py
+    search_rollout.py
+    opponent_model.py
+    policy_prior.py
+Planner now only coordinates those modules.
 """
 from __future__ import annotations
-# evaluation.py is kept for offline training utilities.
-# Runtime evaluation uses ValueNet + heuristic fallback.
+import dataclasses
+import importlib
+import random
+import time
+from . import rules
+from .adapter import (
+    Select,
+    current_state,
+    extract_select,
+    your_index,
+)
+from .enums import (
+    SelectType,
+)
+from .gamedata import GameData
+from .board_value import BoardEvaluator
 from .value_net import (
     ValueNet,
     extract_features,
 )
-from .evaluation import (
-    DynamicWeightGenerator,
-    MatchLearner,
-    Evaluator,
-    EvaluationContext,
+from .determinization import Determinizer
+from .search_tree import SearchTree
+from .policy_prior import PolicyPrior
+from .opponent_model import OpponentModel
+from .search_expansion import SearchExpansion
+from .search_rollout import SearchRollout
+_ENGINE_MODULES = (
+    "cg.api",
+    "cg",
+    "api",
 )
-from .board_value import BoardEvaluator
-import dataclasses
-import importlib
-import math
-import random
-import time
-from collections import Counter
-from . import rules
-from .adapter import Select, current_state, extract_select, your_index
-from .enums import OptionType, SelectType
-from .gamedata import GameData
-from dataclasses import dataclass, field
-# Modules that may expose the search surface, in priority order.
-_ENGINE_MODULES = ("cg.api", "cg", "api")
-_SEARCH_FUNCS = ("search_begin", "search_step", "search_end", "to_observation_class")
+_SEARCH_FUNCS = (
+    "search_begin",
+    "search_step",
+    "search_end",
+    "to_observation_class",
+)
 TERMINAL_WIN = 100000.0
-@dataclass(slots=True)
-class PlannerCache:
-    """
-    All planner caches in one place.
-    feature:
-        state -> FeatureVector
-    evaluation:
-        state -> scalar evaluation
-    search:
-        (state, depth) -> backed-up search value
-    """
-    feature: dict = field(default_factory=dict)
-    evaluation: dict = field(default_factory=dict)
-    search: dict = field(default_factory=dict)
 
-    def clear(self):
-        self.feature.clear()
-        self.evaluation.clear()
-        self.search.clear()
-@dataclass(slots=True)
-class TreeNode:
-    """
-    Statistics stored for one MCTS node.
-    """
-    visits: int = 0
-    virtual_visits: int = 0
-    value_sum: float = 0.0
-    priors: dict[int, float] = field(default_factory=dict)
-    children: dict[int, int] = field(default_factory=dict)
-    expanded: bool = False
-    @property
-    def value(self) -> float:
-        if self.visits == 0:
-            return 0.0
-        return self.value_sum / self.visits
-    
-@dataclass(slots=True)
-class SearchContext:
-    """
-    Per-search mutable state.
-    A new context is created for every determinization so no search
-    accidentally reuses caches from a previous simulation.
-    """
-    cache: PlannerCache = field(default_factory=PlannerCache)
-    tree: dict[int, TreeNode] = field(default_factory=dict)
-    deadline: float = 0.0
-    nodes: int = 0
-
-    def reset(self):
-        self.cache.clear()
-        self.tree.clear()
-        self.nodes = 0
-    
 class TurnPlanner:
     def __init__(
         self,
         cards,
         gamedata: GameData | None = None,
-        your_deck_ids: list[int] | None = None,
-        opponent_deck_ids: list[int] | None = None,
-        max_think_s: float = 0.6,
-        max_depth: int = 6,
-        n_determinizations: int = 2,
-        max_nodes: int = 2000,
-        opp_response: bool | None = None,
-        max_opp_steps: int = 40,
-        seed: int = 0,
+        your_deck_ids=None,
+        opponent_deck_ids=None,
+        max_think_s=0.60,
+        max_depth=6,
+        n_determinizations=2,
+        max_nodes=2000,
+        opp_response=False,
+        seed=0,
     ):
         self.cards = cards
         self.gamedata = gamedata or GameData.load()
         self.your_deck_ids = list(your_deck_ids or [])
         self.opponent_deck_ids = list(
-            opponent_deck_ids or self.your_deck_ids
+            opponent_deck_ids
+            or self.your_deck_ids
         )
         self.max_think_s = max_think_s
         self.max_depth = max_depth
-        self.k = n_determinizations
         self.max_nodes = max_nodes
-        self.max_opp_steps = max_opp_steps
+        self.k = n_determinizations
         self.opp_response = opp_response
-        self._engine = self._locate_engine()
-        self.ctx = SearchContext()
-        self.opponent_embedding = None
-        # -------------------------------
-        # Learned value network (optional)
-        # -------------------------------
-                # -------------------------------
-        # Learned models
-        # -------------------------------
-        try:
-            from .value_net import ValueNet
-            from .weight_model import WeightNet
-            self.value_net = ValueNet()
-            self.weight_net = WeightNet()
-        except Exception:
-            self.value_net = None
-            self.weight_net = None
-        self.use_value_net = (
-            self.value_net is not None
-            and getattr(self.value_net, "available", False)
-        )
-        self.use_weight_net = (
-            self.weight_net is not None
-            and getattr(self.weight_net, "available", False)
-        )
-        # -----------------------------------------
-        # Heuristic fallback evaluator
-        # -----------------------------------------
-        self.weight_generator = DynamicWeightGenerator()
-        self.match_learner = MatchLearner(
-            self.weight_generator,
-        )
-        self.evaluator = Evaluator(
-            self.weight_generator,
-            self.match_learner,
-        )
-        self.board_evaluator = BoardEvaluator(
-            self.gamedata,
-        )
         self.rng = random.Random(seed)
-        self.cpuct = 1.4
+        self.cpuct = 1.40
         self.dirichlet_alpha = 0.30
         self.dirichlet_epsilon = 0.25
         self.min_pw = 2
         self.pw_alpha = 0.50
-        
-    # --- capability check -------------------------------------------------
+        self.Select = Select
+        self.SelectType = SelectType
+        self.rules = rules
+        self._engine = self._locate_engine()
+        try:
+            self.value_net = ValueNet()
+            self.use_value_net = getattr(
+                self.value_net,
+                "available",
+                False,
+            )
+        except Exception:
+            self.value_net = None
+            self.use_value_net = False
+        self.board_evaluator = BoardEvaluator(
+            self.gamedata,
+        )
+        self.tree = SearchTree()
+        self.determinizer = Determinizer(
+            self.gamedata,
+            self.your_deck_ids,
+            self.opponent_deck_ids,
+            seed,
+        )
+        self.policy_prior = PolicyPrior(self)
+        self.opponent_model = OpponentModel(
+            self,
+            self.tree,
+        )
+        self.expansion = SearchExpansion(
+            self,
+            self.tree,
+            self.policy_prior,
+        )
+        self.rollout = SearchRollout(
+            self,
+            self.tree,
+            self.opponent_model,
+        )
+
     def _locate_engine(self):
         for name in _ENGINE_MODULES:
             try:
                 mod = importlib.import_module(name)
             except Exception:
                 continue
-            if all(hasattr(mod, fn) for fn in _SEARCH_FUNCS):
+            if all(
+                hasattr(mod, fn)
+                for fn in _SEARCH_FUNCS
+            ):
                 return mod
         return None
 
-    def available(self) -> bool:
+    def available(self):
         return self._engine is not None
-    
-    def _active(self, player):
-        return _active(player)
 
-    def _prizes_left(self, player):
-        return _prizes_left(player)
-
-    def _best_affordable_dmg(self, attacker, defender, gd):
-        return _best_affordable_dmg(attacker, defender, gd)
-
-    def _can_attack(self, pkmn, gd):
-        return _can_attack(pkmn, gd)
-
-    def _energy_in_play(self, player):
-        return _energy_in_play(player)
-
-    # --- main entry -------------------------------------------------------
     def choose(
         self,
         obs_dict,
-        select: Select,
-        deadline: float,
-    ) -> list[int] | None:
-        """
-        Search every determinization and aggregate the value of each root action.
-        Rather than simply averaging values, penalize actions whose value varies
-        wildly across determinizations.
-        """
-        eng = self._engine
-        if eng is None or not select.options:
+        select,
+        deadline,
+    ):
+        if self._engine is None:
             return None
         if select.select_type != SelectType.MAIN:
             return None
@@ -229,34 +152,24 @@ class TurnPlanner:
         if not isinstance(state, dict):
             return None
         me = your_index(obs_dict)
-        if not isinstance(state.get("turn"), int):
-            return None
-        try:
-            obs_cls = eng.to_observation_class(obs_dict)
-        except Exception:
-            return None
-        if getattr(obs_cls, "search_begin_input", None) is None:
-            return None
-        determinizations = self._build_determinizations(
+        obs_cls = self._engine.to_observation_class(
+            obs_dict,
+        )
+        determinizations = self.determinizer.build(
             obs_dict,
             state,
             me,
+            self.k,
         )
         if not determinizations:
             return None
-        self.ctx.deadline = min(
+        self.tree.ctx.deadline = min(
             deadline,
             time.monotonic() + self.max_think_s,
         )
-        aggregated: dict[int, list[float]] = {}
+        aggregated = {}
         for det in determinizations:
-            if (
-                self.ctx.nodes >= self.max_nodes
-                or time.monotonic() >= self.ctx.deadline
-            ):
-                break
             values = self._search_one(
-                eng,
                 obs_cls,
                 det,
                 me,
@@ -264,21 +177,29 @@ class TurnPlanner:
             if not values:
                 continue
             for action, value in values.items():
-                aggregated.setdefault(action, []).append(value)
+                aggregated.setdefault(
+                    action,
+                    [],
+                ).append(value)
         if not aggregated:
             return None
         best_action = None
         best_score = float("-inf")
-        for action, vals in aggregated.items():
-            mean = sum(vals) / len(vals)
-            if len(vals) > 1:
+        for action, values in aggregated.items():
+            mean = sum(values) / len(values)
+            if len(values) > 1:
                 variance = (
-                    sum((v - mean) ** 2 for v in vals)
-                    / len(vals)
+                    sum(
+                        (v - mean) ** 2
+                        for v in values
+                    )
+                    / len(values)
                 )
             else:
                 variance = 0.0
-            confidence_penalty = 0.15 * math.sqrt(variance)
+            confidence_penalty = (
+                0.15 * (variance ** 0.5)
+            )
             score = mean - confidence_penalty
             if score > best_score:
                 best_score = score
@@ -287,922 +208,164 @@ class TurnPlanner:
             return None
         return [best_action]
 
-    # ========================= CHANGE 2 =========================
-    # Replace _search_one()
-    # ============================================================
+    # ---------------------------------------------------------
     def _search_one(
         self,
-        eng,
         obs_cls,
-        det,
+        determinization,
         me,
-    ) -> dict[int, float] | None:
-        deadline = self.ctx.deadline
+    ):
         try:
-            ss = eng.search_begin(
+            ss = self._engine.search_begin(
                 obs_cls,
-                *det,
+                *determinization,
                 False,
             )
         except Exception:
             return None
-        self.ctx.reset()
-        self.ctx.deadline = deadline
-        # Needed so _expand_node() knows which node is the root.
+        self.tree.clear()
+        self.tree.ctx.deadline = min(
+            self.tree.ctx.deadline,
+            time.monotonic() + self.max_think_s,
+        )
         self._root_search_id = ss.searchId
         try:
             values = self._expand_root(
-                eng,
                 ss,
                 me,
             )
-        except Exception:
-            values = None
         finally:
             self._root_search_id = None
             try:
-                eng.search_end()
+                self._engine.search_end()
             except Exception:
                 pass
         return values
 
-    # --- search tree ------------------------------------------------------
-    # ========================= CHANGE 3 =========================
-    # Replace _expand_root()
-    # ============================================================
+    # ---------------------------------------------------------
     def _expand_root(
         self,
-        eng,
-        root_ss,
+        root_search_state,
         me,
     ):
-        root_obs = _as_obs_dict(root_ss)
+        root_obs = self._as_obs_dict(
+            root_search_state,
+        )
         if root_obs is None:
             return {}
         root_select = extract_select(root_obs)
-        if root_select is None or not root_select.options:
+        if (
+            root_select is None
+            or not root_select.options
+        ):
             return {}
-        root_id = root_ss.searchId
-        self._expand_node(
+        root_id = root_search_state.searchId
+        self.expansion.expand_node(
             root_id,
             root_obs,
             root_select,
         )
         while (
-            self.ctx.nodes < self.max_nodes
-            and time.monotonic() < self.ctx.deadline
+            self.tree.ctx.nodes < self.max_nodes
+            and time.monotonic()
+            < self.tree.ctx.deadline
         ):
-            self._plan(
-                eng,
-                root_ss,
+            self.rollout.search(
+                self._engine,
+                root_search_state,
                 me,
                 self.max_depth,
                 [root_id],
             )
-        root = self._node(root_id)
+        root = self.tree.node(root_id)
         values = {}
         total_visits = max(
             1,
             sum(
-                self._node(cid).visits
+                self.tree.node(cid).visits
                 for cid in root.children.values()
             ),
         )
         for action, child_id in root.children.items():
-            child = self._node(child_id)
+            child = self.tree.node(child_id)
             if child.visits == 0:
                 continue
-            # Blend value with normalized visit count.
-            visit_fraction = child.visits / total_visits
+            visit_fraction = (
+                child.visits / total_visits
+            )
             values[action] = (
                 0.70 * child.value
-                + 0.30 * visit_fraction * TERMINAL_WIN
+                + 0.30
+                * visit_fraction
+                * TERMINAL_WIN
             )
         return values
 
-    def _state_key(
+    # ---------------------------------------------------------
+    def expand_search(
         self,
-        state: dict,
-        me: int,
-    ):
-        """
-        Hashable public representation of a board state.
-        Hidden information is ignored, but every public resource that
-        influences legal actions or evaluation is preserved so search
-        transpositions remain correct.
-        """
-        players = state.get("players")
-        if not isinstance(players, list) or len(players) < 2:
-            return None
-        def encode_pokemon(mon):
-            if not isinstance(mon, dict):
-                return None
-            return (
-                mon.get("id"),
-                mon.get("hp"),
-                len(mon.get("energies") or []),
-                tuple(sorted(mon.get("tools") or [])),
-                tuple(sorted(mon.get("specialConditions") or [])),
-                mon.get("damage", 0),
-            )
-        def encode_player(player):
-            active = encode_pokemon(
-                _active(player)
-            )
-            bench = tuple(
-                sorted(
-                    encode_pokemon(b)
-                    for b in (player.get("bench") or [])
-                    if isinstance(b, dict)
-                )
-            )
-            return (
-                _prizes_left(player),
-                player.get("handCount", 0),
-                player.get("deckCount", 0),
-                player.get("discardCount", len(player.get("discard") or [])),
-                player.get("supporterPlayed", False),
-                active,
-                bench,
-                _energy_in_play(player),
-            )
-        return (
-            encode_player(players[me]),
-            encode_player(players[1 - me]),
-            state.get("turn", 0),
-            state.get("turnPlayer", me),
-            state.get("stadium"),
-        )
-        
-    def _node(
-        self,
-        search_id,
-    ) -> TreeNode:
-        return self.ctx.tree.setdefault(
-            search_id,
-            TreeNode(),
-        )
-
-    def _backup(
-        self,
-        path,
-        value,
-    ):
-        self._revert_virtual_loss(path)
-        for sid in reversed(path):
-            node = self._node(sid)
-            node.visits += 1
-            node.value_sum += value
-            
-    def _apply_virtual_loss(
-        self,
-        path,
-    ):
-        for sid in path:
-            node = self._node(sid)
-            node.virtual_visits += 1
-
-def _revert_virtual_loss(
-    self,
-    path,
-):
-    for sid in path:
-        node = self._node(sid)
-        if node.virtual_visits > 0:
-            node.virtual_visits -= 1
-            
-    def _apply_virtual_loss(
-        self,
-        path,
-    ):
-        """
-        Reserve this path while a simulation is traversing it.
-        """
-        for sid in path:
-            node = self._node(sid)
-            node.virtual_visits += 1
-
-    def _revert_virtual_loss(
-        self,
-        path,
-    ):
-        """
-        Undo the temporary virtual visit counts.
-        """
-        for sid in path:
-            node = self._node(sid)
-            if node.virtual_visits:
-                node.virtual_visits -= 1
-
-    def _expand_node(
-        self,
-        search_id,
-        node_dict,
-        select,
-    ):
-        """
-        Expand a node exactly once.
-        Root receives Dirichlet exploration noise (AlphaZero).
-        Every other node simply stores the policy prior.
-        """
-        node = self._node(search_id)
-        if node.expanded:
-            return
-        priors = self._policy_prior(
-            node_dict,
-            select,
-            search_id,
-        )
-        # Apply Dirichlet noise ONLY at the root.
-        if (
-            search_id == getattr(self, "_root_search_id", None)
-            and len(priors) > 1
-        ):
-            actions = list(priors.keys())
-            noise = self.rng.gammavariate(
-                self.dirichlet_alpha,
-                1.0,
-            )
-            noise = [
-                self.rng.gammavariate(
-                    self.dirichlet_alpha,
-                    1.0,
-                )
-                for _ in actions
-            ]
-            total = sum(noise)
-            if total > 0:
-                noise = [n / total for n in noise]
-                eps = self.dirichlet_epsilon
-                for action, eta in zip(actions, noise):
-                    priors[action] = (
-                        (1.0 - eps) * priors[action]
-                        + eps * eta
-                    )
-        node.priors = priors
-        node.expanded = True
-
-    def _ucb_score(
-        self,
-        parent_id,
-        child_id,
-        prior,
-    ):
-        parent = self._node(parent_id)
-        child = self._node(child_id)
-        parent_visits = (
-            parent.visits
-            + parent.virtual_visits
-        )
-        child_visits = (
-            child.visits
-            + child.virtual_visits
-        )
-        exploration = (
-            self.cpuct
-            * prior
-            * math.sqrt(parent_visits + 1)
-            / (1 + child_visits)
-        )
-        return child.value + exploration
-    
-    def _score_option(
-        self,
-        option,
-        rules_pick,
-        search_id,
-    ):
-        score = 1.0
-        score += self._TYPE_PRIORITY.get(
-            option.type,
-            0,
-        )
-        if option.index == rules_pick:
-            score += 5.0
-        if (
-            search_id is not None
-            and search_id in self.ctx.tree
-        ):
-            parent = self._node(search_id)
-            child_id = parent.children.get(
-                option.index
-            )
-            if child_id is not None:
-                child = self._node(child_id)
-                if child.visits > 0:
-                    q = child.value
-                    score += 2.5 * math.tanh(
-                        q / 75.0
-                    )
-                    score += min(
-                        math.log1p(child.visits),
-                        2.5,
-                    )
-        emb = self.opponent_embedding
-        if emb is not None:
-            attack_rate, ability_rate, item_rate = emb
-            if (
-                option.type == OptionType.ATTACK
-                and attack_rate > 0.55
-            ):
-                score += 1.25
-            elif (
-                option.type == OptionType.ABILITY
-                and ability_rate > 0.30
-            ):
-                score += 1.0
-            elif (
-                option.type == OptionType.PLAY
-                and item_rate > 0.40
-            ):
-                score += 0.8
-        return max(score, 0.01)
-    
-    def _normalize_priors(
-        self,
-        scores,
-    ):
-        total = sum(scores.values())
-        if total <= 0:
-            n = max(len(scores), 1)
-            return {
-                k: 1.0 / n
-                for k in scores
-            }
-        return {
-            k: v / total
-            for k, v in scores.items()
-        }
-        
-    def _progressive_width(
-        self,
-        search_id,
-        max_children,
-    ):
-        """
-        Progressive widening.
-        The number of children allowed to exist grows with the number
-        of visits to the node.
-        width = min_pw + visits^alpha
-        """
-        node = self._node(search_id)
-        width = int(
-            self.min_pw
-            + (node.visits ** self.pw_alpha)
-        )
-        return min(
-            width,
-            max_children,
-        )
-    
-    def _policy_prior(
-        self,
+        engine,
+        search_state,
         node,
-        select,
-        search_id=None,
-    ):
-        """
-        Compute policy priors for every legal action.
-        Progressive widening is handled during expansion rather than by
-        discarding actions here.
-        """
-        try:
-            rules_pick = rules._choose_main(
-                node,
-                select,
-                self.gamedata,
-            )
-        except Exception:
-            rules_pick = None
-        scores = {}
-        for option in select.options:
-            scores[option.index] = self._score_option(
-                option,
-                rules_pick,
-                search_id,
-            )
-        return self._normalize_priors(scores)
-     
-    # ========================= CHANGE 4 =========================
-    # Replace _plan() completely
-    # ============================================================
-    def _check_terminal(
-        self,
-        state,
-        me,
-    ):
-        result = state.get("result", -1)
-        if isinstance(result, int) and result >= 0:
-            return self._terminal_value(result, me)
-        return None
-    
-    def _check_cutoff(
-        self,
         state,
         select,
         me,
         depth,
+        path,
     ):
-        if (
-            depth <= 0
-            or self.ctx.nodes >= self.max_nodes
-            or time.monotonic() >= self.ctx.deadline
-        ):
-            return self._eval(state, me)
-        if select is None or not select.options:
-            return self._eval(state, me)
-        return None
-    
-    def _handle_opponent(
-        self,
-        eng,
-        ss,
-        state,
-        me,
-    ):
-        """
-        Handle opponent decisions.
-        If opponent search is enabled, perform a shallow search for the
-        opponent rather than blindly following the rule policy.
-        """
-        acting = state.get("yourIndex", me)
-        if acting == me:
-            return None
-        if not self.opp_response:
-            return self._eval(state, me)
-        node = _as_obs_dict(ss)
-        if node is None:
-            return self._eval(state, me)
-        select = extract_select(node)
-        if (
-            select is None
-            or not select.options
-        ):
-            return self._eval(state, me)
-        if select.select_type != SelectType.MAIN:
-            return self._drive_to_my_turn(
-                eng,
-                ss,
-                me,
-            )
-        value = self._expand_search_node(
-            eng,
-            ss,
+        return self.expansion.expand_search(
+            engine,
+            search_state,
             node,
             state,
             select,
-            1 - me,
-            2,
-            [ss.searchId],
-        )
-        return -value
-        
-    def _handle_forced_selection(
-        self,
-        eng,
-        ss,
-        node,
-        state,
-        select,
-        me,
-        depth,
-        path,
-    ):
-        if select.select_type == SelectType.MAIN:
-            return None
-        try:
-            choice = rules.choose(
-                node,
-                select,
-                self.gamedata,
-            )
-        except Exception:
-            choice = list(
-                range(
-                    max(
-                        1,
-                        select.min_count,
-                    )
-                )
-            )
-        try:
-            nxt = eng.search_step(
-                ss.searchId,
-                choice,
-            )
-        except Exception:
-            return self._eval(
-                state,
-                me,
-            )
-        self.ctx.nodes += 1
-        return self._plan(
-            eng,
-            nxt,
             me,
             depth,
             path,
-        )    
+            self.rollout,
+        )
         
-    def _select_best_action(
-        self,
-        search_id,
-    ):
-        """
-        Select the child with the highest PUCT score.
-        """
-        node = self._node(search_id)
-        best_action = None
-        best_score = -float("inf")
-        for action, prior in node.priors.items():
-            child_id = node.children.get(action)
-            if child_id is None:
-                score = (
-                    self.cpuct
-                    * prior
-                    * math.sqrt(node.visits + 1)
-                )
-            else:
-                score = self._ucb_score(
-                    search_id,
-                    child_id,
-                    prior,
-                )
-            if score > best_score:
-                best_score = score
-                best_action = action
-        return best_action
-    
-    def _select_child(
-        self,
-        search_id,
-    ):
-        """
-        Select the already-expanded child with the highest PUCT score.
-        Returns (action, child_id).
-        """
-        node = self._node(search_id)
-        best_action = None
-        best_child = None
-        best_score = -float("inf")
-        for action, child_id in node.children.items():
-            prior = node.priors[action]
-            score = self._ucb_score(
-                search_id,
-                child_id,
-                prior,
-            )
-            if score > best_score:
-                best_score = score
-                best_action = action
-                best_child = child_id
-        return best_action, best_child
-    
-    def _step_child(
-        self,
-        eng,
-        ss,
-        action,
-    ):
-        """
-        Execute one search step.
-        """
-        try:
-            nxt = eng.search_step(
-                ss.searchId,
-                [action],
-            )
-        except Exception:
-            return None
-        self.ctx.nodes += 1
-        return nxt
-
-    def _expand_search_node(
-        self,
-        eng,
-        ss,
-        node,
-        state,
-        select,
-        me,
-        depth,
-        path,
-    ):
-        """
-        Expand one search node using
-        Progressive Widening +
-        PUCT +
-        Virtual Loss.
-        """
-        self._expand_node(
-            ss.searchId,
-            node,
-            select,
-        )
-        stats = self._node(ss.searchId)
-        allowed = self._progressive_width(
-            ss.searchId,
-            len(stats.priors),
-        )
-        # --------------------------------------------------
-        # Expand a new child first (Progressive Widening)
-        # --------------------------------------------------
-        if len(stats.children) < allowed:
-            unexplored = [
-                a
-                for a in stats.priors
-                if a not in stats.children
-            ]
-            if unexplored:
-                unexplored.sort(
-                    key=lambda a: stats.priors[a],
-                    reverse=True,
-                )
-                action = unexplored[0]
-                nxt = self._step_child(
-                    eng,
-                    ss,
-                    action,
-                )
-                if nxt is None:
-                    return self._eval(state, me)
-                child_id = nxt.searchId
-                stats.children[action] = child_id
-                child_node = _as_obs_dict(nxt)
-                if child_node is not None:
-                    child_select = extract_select(
-                        child_node
-                    )
-                    if child_select is not None:
-                        self._expand_node(
-                            child_id,
-                            child_node,
-                            child_select,
-                        )
-                new_path = path + [child_id]
-                self._apply_virtual_loss(
-                    new_path
-                )
-                value = self._plan(
-                    eng,
-                    nxt,
-                    me,
-                    depth - 1,
-                    new_path,
-                )
-                self._revert_virtual_loss(
-                    new_path
-                )
-                return value
-        # --------------------------------------------------
-        # Otherwise select an existing child using PUCT
-        # --------------------------------------------------
-        best_action = None
-        best_score = -float("inf")
-        for action, child_id in stats.children.items():
-            score = self._ucb_score(
-                ss.searchId,
-                child_id,
-                stats.priors[action],
-            )
-            if score > best_score:
-                best_score = score
-                best_action = action
-        if best_action is None:
-            return self._eval(state, me)
-        nxt = self._step_child(
-            eng,
-            ss,
-            best_action,
-        )
-        if nxt is None:
-            return self._eval(state, me)
-        child_id = nxt.searchId
-        new_path = path + [child_id]
-        self._apply_virtual_loss(
-            new_path
-        )
-        value = self._plan(
-            eng,
-            nxt,
-            me,
-            depth - 1,
-            new_path,
-        )
-        self._revert_virtual_loss(
-            new_path
-        )
-        return value
-    
-    def _plan(
-        self,
-        eng,
-        ss,
-        me,
-        depth,
-        path,
-    ):
-        self._apply_virtual_loss(path)
-        try:
-            node = _as_obs_dict(ss)
-            if node is None:
-                return 0.0
-            state = node.get("current")
-            if not isinstance(state, dict):
-                return 0.0
-            key = self._state_key(state, me)
-            if key is None:
-                key = ("leaf", id(state))
-            cached = self.ctx.cache.search.get(
-                (key, depth)
-            )
-            if cached is not None:
-                self._backup(path, cached)
-                return cached
-            select = extract_select(node)
-            # ------------------------------
-            # Terminal node
-            # ------------------------------
-            value = self._check_terminal(
-                state,
-                me,
-            )
-            if value is not None:
-                self.ctx.cache.search[(key, depth)] = value
-                self._backup(path, value)
-                return value
-            # ------------------------------
-            # Cutoff
-            # ------------------------------
-            value = self._check_cutoff(
-                state,
-                select,
-                me,
-                depth,
-            )
-            if value is not None:
-                self.ctx.cache.search[(key, depth)] = value
-                self._backup(path, value)
-                return value
-            # ------------------------------
-            # Opponent
-            # ------------------------------
-            value = self._handle_opponent(
-                eng,
-                ss,
-                state,
-                me,
-            )
-            if value is not None:
-                self.ctx.cache.search[(key, depth)] = value
-                self._backup(path, value)
-                return value
-            # ------------------------------
-            # Forced selections
-            # ------------------------------
-            value = self._handle_forced_selection(
-                eng,
-                ss,
-                node,
-                state,
-                select,
-                me,
-                depth,
-                path,
-            )
-            if value is not None:
-                self.ctx.cache.search[(key, depth)] = value
-                self._backup(path, value)
-                return value
-            # ------------------------------
-            # Expand
-            # ------------------------------
-            value = self._expand_search_node(
-                eng,
-                ss,
-                node,
-                state,
-                select,
-                me,
-                depth,
-                path,
-            )
-            self.ctx.cache.search[
-                (key, depth)
-            ] = value
-            self._backup(path, value)
-            return value
-        finally:
-            # Safety in case anything throws before _backup()
-            self._revert_virtual_loss(path)
-    
-    def _drive_to_my_turn(self, eng, ss, me) -> float:
-        """Drive every decision with the rule policy until it is our next MAIN
-        turn, the game ends, or the budget is exhausted; evaluate there.
-        This plays out the opponent's whole reply (and any forced choice we must
-        make in response, e.g. promoting a new Active after a KO) on the
-        determinized board, so the returned value reflects the position we will
-        actually face — capturing whether our end-of-turn board survives.
-        """
-        for _ in range(self.max_opp_steps):
-            if time.monotonic() >= self.ctx.deadline or self.ctx.nodes >= self.max_nodes:
-                break
-            node = _as_obs_dict(ss)
-            if node is None:
-                break
-            state = node.get("current")
-            if not isinstance(state, dict):
-                break
-            result = state.get("result", -1)
-            if isinstance(result, int) and result >= 0:
-                return self._terminal_value(result, me)
-            select = extract_select(node)
-            if select is None or not select.options:
-                return self._eval(state, me)
-            acting = state.get("yourIndex", me)
-            # Reached our next turn: evaluate the board the opponent handed back.
-            if acting == me and select.select_type == SelectType.MAIN:
-                return self._eval(state, me)
-            try:
-                choice = rules.choose(node, select, self.gamedata)
-            except Exception:
-                choice = list(range(max(1, select.min_count)))
-            try:
-                ss = eng.search_step(ss.searchId, choice)
-            except Exception:
-                break
-            self.ctx.nodes += 1
-        node = _as_obs_dict(ss)
-        state = node.get("current") if node else None
-        if isinstance(state, dict):
-            return self._eval(state, me)
-        return 0.0
-
-    def _terminal_value(self, result: int, me: int) -> float:
-        if result == me:
-            return TERMINAL_WIN
-        if result == 2:
-            return 0.0
-        return -TERMINAL_WIN
-
-    # --- candidate ordering ----------------------------------------------
-    _TYPE_PRIORITY = {
-        OptionType.ABILITY: 7,
-        OptionType.ATTACK: 6,
-        OptionType.EVOLVE: 5,
-        OptionType.ATTACH: 4,
-        OptionType.PLAY: 3,
-        OptionType.RETREAT: 2,
-        OptionType.DISCARD: 1,
-        OptionType.END: 0,
-    }
-    
-    # --- leaf evaluation --------------------------------------------------
+        # ---------------------------------------------------------
     def _eval(
         self,
         state,
         me,
-    ) -> float:
-        """
-        Evaluate a board state.
-        Pipeline:
-            GameState
-                ↓
-            FeatureExtractor
-                ↓
-            ValueNet (if available)
-                ↓
-            Handcrafted evaluator (fallback)
-        All results are cached within the current search context.
-        """
+    ):
         key = self._state_key(
             state,
             me,
         )
         if key is not None:
-            cached = self.ctx.cache.evaluation.get(key)
+            cached = (
+                self.tree.ctx.cache.evaluation.get(key)
+            )
             if cached is not None:
                 return cached
-        features = extract_features(
-            state,
-            me,
-            self.gamedata,
-            self,
-        )
-        # --------------------------------------------------
-        # Preferred evaluation:
-        # learned value network
-        # --------------------------------------------------
+        features = None
+        if key is not None:
+            features = (
+                self.tree.ctx.cache.feature.get(key)
+            )
+        if features is None:
+            features = extract_features(
+                state,
+                me,
+                self.gamedata,
+                self,
+            )
+            if key is not None:
+                self.tree.ctx.cache.feature[
+                    key
+                ] = features
         score = None
         if (
-            getattr(self, "use_value_net", False)
+            self.use_value_net
             and self.value_net is not None
         ):
             try:
                 win_prob = self.value_net.predict(
-                    features
+                    features,
                 )
-                # convert probability into symmetric score
                 score = (
                     (win_prob - 0.5)
                     * 2.0
@@ -1210,310 +373,207 @@ def _revert_virtual_loss(
                 )
             except Exception:
                 score = None
-        # --------------------------------------------------
-        # Fallback:
-        # handcrafted evaluator
-        # --------------------------------------------------
-        # --------------------------------------------------
-        # Fallback:
-        # deterministic heuristic evaluation
-        # --------------------------------------------------
         if score is None:
             try:
-                score = self.board_evaluator.evaluate(
-                    state,
-                    me,
+                score = (
+                    self.board_evaluator.evaluate(
+                        state,
+                        me,
+                    )
                 )
             except Exception:
-                context = EvaluationContext(
-                    game_phase=(
-                        1.0
-                        - (
-                            features[1]
-                            + features[2]
-                        )
-                        / 12.0
-                    ),
-                    prize_diff=features[0],
-                    search_depth=self.max_depth,
-                    search_confidence=1.0,
-                    opponent_embedding=self.opponent_embedding,
-                )
-                if (
-                    self.use_weight_net
-                    and self.weight_net is not None
-                ):
-                    try:
-                        weights = self.weight_net.predict(
-                            features,
-                            context,
-                        )
-                        self.weight_generator.set_runtime_weights(
-                            weights
-                        )
-                    except Exception:
-                        pass
-                score = self.evaluator.evaluate(
-                    features,
-                    context,
-                ).score
-        # Cache evaluation for this search.
+                score = None
+        if score is None:
+            score = 0.0
         if key is not None:
-            self.ctx.cache.evaluation[key] = score
+            self.tree.ctx.cache.evaluation[
+                key
+            ] = score
         return score
 
-    # --- determinization --------------------------------------------------
-    def _build_my_pool(
+    # ---------------------------------------------------------
+    def _terminal_value(
         self,
-        player,
+        result,
+        me,
     ):
-        unseen = Counter(
-            self.your_deck_ids
-        )
-        for cid in _visible_ids(player):
-            if unseen.get(cid, 0):
-                unseen[cid] -= 1
-        return list(
-            unseen.elements()
-        )
-    
-    def _build_opponent_pool(
+        if result == me:
+            return TERMINAL_WIN
+        if result == 2:
+            return 0.0
+        return -TERMINAL_WIN
+
+    # ---------------------------------------------------------
+    def _state_key(
         self,
-    ):
-        pool = list(
-            self.opponent_deck_ids
-        )
-        self.rng.shuffle(pool)
-        return pool
-    
-    def _sample_determinization(
-        self,
-        my_pool_base,
-        opp_pool,
-        counts,
-        deck_given,
-        fb,
-        opp_active_needed,
-    ):
-        (
-            my_deck_n,
-            my_prize_n,
-            opp_deck_n,
-            opp_prize_n,
-            opp_hand_n,
-        ) = counts
-        my_pool = list(my_pool_base)
-        self.rng.shuffle(my_pool)
-        if deck_given:
-            your_deck = []
-        else:
-            your_deck = my_pool[:my_deck_n]
-        your_prize = my_pool[
-            my_deck_n:
-            my_deck_n + my_prize_n
-        ]
-        your_deck = (
-            []
-            if deck_given
-            else _pad(
-                your_deck,
-                my_deck_n,
-                fb,
-            )
-        )
-        your_prize = _pad(
-            your_prize,
-            my_prize_n,
-            fb,
-        )
-        opp_deck = _pad(
-            opp_pool[:opp_deck_n],
-            opp_deck_n,
-            fb,
-        )
-        opp_prize = _pad(
-            opp_pool[
-                opp_deck_n:
-                opp_deck_n + opp_prize_n
-            ],
-            opp_prize_n,
-            fb,
-        )
-        opp_hand = _pad(
-            opp_pool[
-                opp_deck_n + opp_prize_n:
-                opp_deck_n + opp_prize_n + opp_hand_n
-            ],
-            opp_hand_n,
-            fb,
-        )
-        opp_active = []
-        if opp_active_needed:
-            cid = self._first_basic(
-                opp_hand + opp_deck
-            )
-            if cid is None:
-                return None
-            opp_active = [cid]
-        return (
-            your_deck,
-            your_prize,
-            opp_deck,
-            opp_prize,
-            opp_hand,
-            opp_active,
-        )
-    
-    def _build_determinizations(
-        self,
-        obs_dict,
         state,
         me,
     ):
-        players = state.get("players") or []
-        if len(players) < 2:
-            return []
-        mp = players[me]
-        op = players[1 - me]
-        sel = obs_dict.get("select")
-        deck_given = (
-            isinstance(sel, dict)
-            and sel.get("deck") is not None
-        )
-        counts = (
-            int(mp.get("deckCount") or 0),
-            len(mp.get("prize") or []),
-            int(op.get("deckCount") or 0),
-            len(op.get("prize") or []),
-            int(op.get("handCount") or 0),
-        )
-        fb = (
-            self.your_deck_ids[0]
-            if self.your_deck_ids
-            else 0
-        )
-        my_pool = self._build_my_pool(mp)
-        opp_active_needed = (
-            bool(op.get("active"))
-            and op["active"][0] is None
-        )
-        dets = []
-        for _ in range(self.k):
-            opp_pool = self._build_opponent_pool()
-            det = self._sample_determinization(
-                my_pool,
-                opp_pool,
-                counts,
-                deck_given,
-                fb,
-                opp_active_needed,
+        players = state.get("players")
+        if (
+            not isinstance(players, list)
+            or len(players) < 2
+        ):
+            return None
+        
+        def encode_pokemon(mon):
+            if not isinstance(mon, dict):
+                return None
+            return (
+                mon.get("id"),
+                mon.get("hp"),
+                mon.get("damage", 0),
+                len(mon.get("energies") or []),
+                tuple(
+                    sorted(
+                        mon.get("tools") or []
+                    )
+                ),
+                tuple(
+                    sorted(
+                        mon.get(
+                            "specialConditions"
+                        )
+                        or []
+                    )
+                ),
             )
-            if det is not None:
-                dets.append(det)
-        return dets
 
-    def _first_basic(self, ids):
-        for cid in ids:
-            if self.gamedata.is_basic_pokemon(cid):
-                return cid
-        return None
-    
-# --- module helpers -------------------------------------------------------
-def _as_obs_dict(ss):
-    """Convert a SearchState's Observation dataclass to a plain dict."""
-    obs = getattr(ss, "observation", None)
-    if obs is None:
-        return None
-    try:
-        return dataclasses.asdict(obs)
-    except Exception:
-        return None
-    
-def _active(player: dict) -> dict | None:
+        def encode_player(player):
+            active = encode_pokemon(
+                _active(player),
+            )
+            bench = tuple(
+                sorted(
+                    (
+                        encode_pokemon(mon)
+                        for mon in (
+                            player.get("bench")
+                            or []
+                        )
+                        if isinstance(mon, dict)
+                    ),
+                    key=str,
+                )
+            )
+            return (
+                _prizes_left(player),
+                player.get("deckCount", 0),
+                player.get("handCount", 0),
+                player.get(
+                    "discardCount",
+                    len(
+                        player.get("discard")
+                        or []
+                    ),
+                ),
+                player.get(
+                    "supporterPlayed",
+                    False,
+                ),
+                active,
+                bench,
+                _energy_in_play(player),
+            )
+        return (
+            encode_player(players[me]),
+            encode_player(players[1 - me]),
+            state.get("turnPlayer"),
+            state.get("turn", 0),
+            state.get("stadium"),
+            state.get("result", -1),
+        )
+
+    # ---------------------------------------------------------
+    @staticmethod
+    def _as_obs_dict(search_state):
+        obs = getattr(
+            search_state,
+            "observation",
+            None,
+        )
+        if obs is None:
+            return None
+        try:
+            return dataclasses.asdict(obs)
+        except Exception:
+            return None
+        
+# ----------------------------------------------------------------------
+# Generic helper functions
+# ----------------------------------------------------------------------
+def _active(player):
     arr = player.get("active") or []
     if arr and isinstance(arr[0], dict):
         return arr[0]
     return None
 
-def _prizes_left(player: dict) -> int:
-    """Number of prizes this player still has to take (i.e. is still owed).
-    Counting remaining entries in the prize array — NOT the number of face-down
-    (None) entries — because ``search_begin`` reveals the prizes we predict, so
-    in a search state every prize is a known card (``none == 0``). The array
-    itself shrinks as prizes are taken (verified: 6 -> 5 -> 3), so ``len`` is the
-    correct, representation-independent measure in both real and search states.
-    """
+def _prizes_left(player):
     prize = player.get("prize")
-    return len(prize) if isinstance(prize, list) else 6
+    if isinstance(prize, list):
+        return len(prize)
+    return 6
 
-def _energy_in_play(player: dict) -> int:
+def _energy_in_play(player):
     total = 0
-    for mon in [_active(player)] + list(player.get("bench") or []):
-        if isinstance(mon, dict):
-            total += len(mon.get("energies") or [])
+    mons = [_active(player)]
+    mons.extend(player.get("bench") or [])
+    for mon in mons:
+        if not isinstance(mon, dict):
+            continue
+        total += len(mon.get("energies") or [])
     return total
 
-def _best_affordable_dmg(attacker: dict, defender: dict, gd: GameData) -> int:
+def _best_affordable_dmg(
+    attacker,
+    defender,
+    gamedata,
+):
     cid = attacker.get("id")
     if cid is None:
         return 0
     attached = attacker.get("energies") or []
-    def_id = defender.get("id") if isinstance(defender, dict) else None
+    defender_id = None
+    if isinstance(defender, dict):
+        defender_id = defender.get("id")
     best = 0
-    for aid in gd.card_attacks.get(cid, []):
-        if gd.can_pay(gd.attack_cost(aid), attached):
-            dmg = gd.attack_damage(aid)
-            if def_id is not None:
-                dmg = gd.effective_damage(cid, dmg, def_id)
-            best = max(best, dmg)
+    for attack_id in gamedata.card_attacks.get(
+        cid,
+        [],
+    ):
+        if not gamedata.can_pay(
+            gamedata.attack_cost(attack_id),
+            attached,
+        ):
+            continue
+        damage = gamedata.attack_damage(
+            attack_id,
+        )
+        if defender_id is not None:
+            damage = gamedata.effective_damage(
+                cid,
+                damage,
+                defender_id,
+            )
+        if damage > best:
+            best = damage
     return best
 
-def _can_attack(pkmn: dict, gd: GameData) -> bool:
-    cid = pkmn.get("id")
+def _can_attack(
+    pokemon,
+    gamedata,
+):
+    cid = pokemon.get("id")
     if cid is None:
         return False
-    attached = pkmn.get("energies") or []
-    for aid in gd.card_attacks.get(cid, []):
-        if gd.can_pay(gd.attack_cost(aid), attached):
+    attached = pokemon.get("energies") or []
+    for attack_id in gamedata.card_attacks.get(
+        cid,
+        [],
+    ):
+        if gamedata.can_pay(
+            gamedata.attack_cost(attack_id),
+            attached,
+        ):
             return True
     return False
-
-def _pad(lst, n: int, fb: int):
-    if n <= 0:
-        return []
-    out = list(lst)
-    if len(out) >= n:
-        return out[:n]
-    while len(out) < n:
-        out.append(fb)
-    return out
-
-def _visible_ids(player: dict) -> list[int]:
-    out: list[int] = []
-    for c in player.get("hand") or []:
-        cid = _cid(c)
-        if cid is not None:
-            out.append(cid)
-    for c in player.get("discard") or []:
-        cid = _cid(c)
-        if cid is not None:
-            out.append(cid)
-    for mon in [_active(player)] + list(player.get("bench") or []):
-        if not isinstance(mon, dict):
-            continue
-        if isinstance(mon.get("id"), int):
-            out.append(mon["id"])
-        for key in ("energyCards", "tools", "preEvolution"):
-            for c in mon.get(key) or []:
-                cid = _cid(c)
-                if cid is not None:
-                    out.append(cid)
-    return out
-
-def _cid(card):
-    if isinstance(card, dict):
-        v = card.get("id")
-        if v is None:
-            v = card.get("cardId")
-        return v if isinstance(v, int) else None
-    return None

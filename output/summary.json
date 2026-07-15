@@ -1,0 +1,9 @@
+{
+    "games": 105,
+    "wins": 45,
+    "losses": 60,
+    "win_rate": 42.86,
+    "average_turns": 117.62,
+    "shortest_game": 17,
+    "longest_game": 295
+}
