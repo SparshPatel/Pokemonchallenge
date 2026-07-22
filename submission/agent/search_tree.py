@@ -132,7 +132,6 @@ class SearchTree:
         value,
         discount: float = 0.995,
     ):
-        self.revert_virtual_loss(path)
         for sid in reversed(path):
             node = self.node(sid)
             node.visits += 1

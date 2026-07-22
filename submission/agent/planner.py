@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import random
+import os
 import time
 from . import rules
 from .adapter import (
@@ -68,8 +69,7 @@ class TurnPlanner:
         self.gamedata = gamedata or GameData.load()
         self.your_deck_ids = list(your_deck_ids or [])
         self.opponent_deck_ids = list(
-            opponent_deck_ids
-            or self.your_deck_ids
+            opponent_deck_ids or self.your_deck_ids
         )
         self.max_think_s = max_think_s
         self.max_depth = max_depth
@@ -87,7 +87,12 @@ class TurnPlanner:
         self.rules = rules
         self._engine = self._locate_engine()
         try:
-            self.value_net = ValueNet()
+            self.value_net = ValueNet(
+                os.path.join(
+                    os.path.dirname(__file__),
+                    "value_net.npz",
+                )
+            )
             self.use_value_net = getattr(
                 self.value_net,
                 "available",
@@ -95,6 +100,20 @@ class TurnPlanner:
             )
         except Exception:
             self.value_net = None
+            self._vn_scale = 60.0
+
+            if use_value_net is None:
+                use_value_net = os.environ.get("PTCG_VALUE_NET", "0") == "1"
+
+            if use_value_net:
+                try:
+                    path = value_net_path or os.environ.get(
+                        "PTCG_VALUE_NET_PATH",
+                        "agent/value_net.npz",
+                    )
+                    self.value_net = ValueNet.load(path)
+                except Exception:
+                    self.value_net = None
             self.use_value_net = False
         self.board_evaluator = BoardEvaluator(
             self.gamedata,
@@ -106,7 +125,10 @@ class TurnPlanner:
             self.opponent_deck_ids,
             seed,
         )
-        self.policy_prior = PolicyPrior(self)
+        self.policy_prior = PolicyPrior(
+            self.gamedata,
+            self,
+        )
         self.opponent_model = OpponentModel(
             self,
             self.tree,
@@ -121,6 +143,15 @@ class TurnPlanner:
             self.tree,
             self.opponent_model,
         )
+        # -------- NEW --------
+        self.adaptive = None
+        try:
+            from .brain.adaptive import AdaptiveBrain
+            self.adaptive = AdaptiveBrain()
+        except Exception:
+            self.adaptive = None
+
+        self.opponent_embedding = None
 
     def _locate_engine(self):
         for name in _ENGINE_MODULES:
@@ -229,6 +260,18 @@ class TurnPlanner:
             time.monotonic() + self.max_think_s,
         )
         self._root_search_id = ss.searchId
+        # -----------------------------
+        # NEW: update opponent model
+        # -----------------------------
+        try:
+            root_obs = self._as_obs_dict(ss)
+            if root_obs is not None:
+                self.opponent_model.observe(root_obs)
+                self.opponent_embedding = (
+                    self.opponent_model.embedding()
+                )
+        except Exception:
+            self.opponent_embedding = None
         try:
             values = self._expand_root(
                 ss,
@@ -291,14 +334,76 @@ class TurnPlanner:
             if child.visits == 0:
                 continue
             visit_fraction = (
-                child.visits / total_visits
+                child.visits
+                / total_visits
             )
-            values[action] = (
-                0.70 * child.value
-                + 0.30
+            score = (
+                0.65 * child.value
+                + 0.25
                 * visit_fraction
                 * TERMINAL_WIN
             )
+            # -------------------------
+            # Adaptive bias
+            # -------------------------
+            if self.adaptive is not None:
+                try:
+                    adaptive = self.adaptive.analyse(
+                        type(
+                            "BrainState",
+                            (),
+                            {
+                                "me": type(
+                                    "P",
+                                    (),
+                                    {
+                                        "prizes_remaining":
+                                            _prizes_left(
+                                                root_obs["current"]["players"][me]
+                                            )
+                                    },
+                                )(),
+                                "opponent": type(
+                                    "P",
+                                    (),
+                                    {
+                                        "prizes_remaining":
+                                            _prizes_left(
+                                                root_obs["current"]["players"][1 - me]
+                                            )
+                                    },
+                                )(),
+                                "last_action": None,
+                            },
+                        )(),
+                        type(
+                            "Strategy",
+                            (),
+                            {
+                                "comeback_mode": False,
+                            },
+                        )(),
+                        type(
+                            "Prediction",
+                            (),
+                            {
+                                "board_risk": 0.0,
+                                "active_survival_probability": 0.5,
+                                "knockout_probability": 0.5,
+                            },
+                        )(),
+                    )
+                    score += (
+                        adaptive.aggression_shift
+                        * 6.0
+                    )
+                    score -= (
+                        adaptive.survival_shift
+                        * 4.0
+                    )
+                except Exception:
+                    pass
+            values[action] = score
         return values
 
     # ---------------------------------------------------------

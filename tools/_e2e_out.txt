@@ -1,9 +1,0 @@
-start e2e: submission/main.agent with planner default-on
-loaded submission/main.py
-game 0: first=ours result=0 won=True
-game 1: first=opp result=1 won=True
-game 2: first=ours result=0 won=True
-game 3: first=opp result=0 won=False
-RESULT: wins=3/4 agent_errors=0 our_decisions=193 avg_think=48.87ms max_think=168.4ms
-VERDICT: PASS (no crashes)
-DONE

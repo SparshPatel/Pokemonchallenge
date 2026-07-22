@@ -95,7 +95,15 @@ def is_deck_phase(obs_dict) -> bool:
     return obs_dict.get("select") is None
 
 def extract_select(obs_dict) -> Select | None:
-    """Normalize the ``select`` block, or ``None`` during the deck phase."""
+    """Normalize the ``select`` block, or ``None`` during deck selection.   
+    The engine's minCount/maxCount contract is authoritative.
+    We only sanitize obviously invalid negative values and cap the
+    maximum by the number of available options.
+    IMPORTANT:
+    Do not raise max_count to min_count. If the engine says
+    maxCount=1, the agent must never be allowed to infer that
+    returning 2 selections is legal.
+    """
     if not isinstance(obs_dict, dict):
         return None
     sel = obs_dict.get("select")
@@ -105,26 +113,46 @@ def extract_select(obs_dict) -> Select | None:
     options: list[Option] = []
     for i, opt in enumerate(raw_options):
         opt_dict = opt if isinstance(opt, dict) else {}
-        options.append(Option(index=i, type=opt_dict.get("type"), raw=opt_dict))
+        options.append(
+            Option(
+                index=i,
+                type=opt_dict.get("type"),
+                raw=opt_dict,
+            )
+        )
     n = len(options)
-    min_count = sel.get("minCount")
-    max_count = sel.get("maxCount")
-    min_count = 0 if min_count is None else int(min_count)
-    max_count = n if max_count is None else int(max_count)
-    # Clamp to valid bounds against the actual option count.
+    raw_min_count = sel.get("minCount")
+    raw_max_count = sel.get("maxCount")
+    min_count = (
+        0
+        if raw_min_count is None
+        else max(0, int(raw_min_count))
+    )
+    max_count = (
+        n
+        if raw_max_count is None
+        else max(0, int(raw_max_count))
+    )
+    # Never allow the normalized contract to exceed the actual
+    # number of available options.
     if n:
-        min_count = max(0, min(min_count, n))
-        max_count = max(min_count, min(max_count, n))
+        min_count = min(min_count, n)
+        max_count = min(max_count, n)
     else:
-        max_count = max(min_count, max_count)
+        min_count = 0
+        max_count = 0
     return Select(
         options=options,
         min_count=min_count,
         max_count=max_count,
         select_type=sel.get("type"),
         context=sel.get("context"),
-        remain_energy_cost=int(sel.get("remainEnergyCost") or 0),
-        remain_damage_counter=int(sel.get("remainDamageCounter") or 0),
+        remain_energy_cost=int(
+            sel.get("remainEnergyCost") or 0
+        ),
+        remain_damage_counter=int(
+            sel.get("remainDamageCounter") or 0
+        ),
         deck=sel.get("deck"),
         raw=sel,
     )

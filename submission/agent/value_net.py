@@ -405,40 +405,17 @@ class ValueNet:
         feats,
     ):
         """
-        Returns a calibrated win probability.
-        The raw network output is temperature-scaled so that values are
-        less overconfident and produce smoother gradients for search.
+        Returns calibrated win probability.
         """
         if not self.available:
             return 0.5
-        x = np.asarray(
-            feats,
-            dtype=np.float64,
-        ).ravel()
-        if self.kind == "logistic":
-            z = float(
-                x @ self._w
-            )
-        else:
-            h = np.tanh(
-                x @ self._W1 + self._b1
-            )
-            z = float(
-                h @ self._W2 + self._b2
-            )
+        z = self.raw_value(feats)
         z += self.bias
-        # ---------- temperature scaling ----------
         temperature = 1.5
         z /= temperature
-        # ---------- numerical stability ----------
-        z = max(
-            min(z, 20.0),
-            -20.0,
-        )
+        z = max(min(z, 20.0), -20.0)
         if z >= 0:
-            return 1.0 / (
-                1.0 + np.exp(-z)
-            )
+            return 1.0 / (1.0 + np.exp(-z))
         e = np.exp(z)
         return e / (1.0 + e)
 

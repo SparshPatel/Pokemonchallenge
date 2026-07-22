@@ -404,94 +404,71 @@ def _future_attack_value(
 ) -> float:
     """
     Strategic value beyond immediate damage.
-
     Rewards attacks that improve future board state, not just HP removal.
     """
-
     atk = gd.attack(attack_id)
-
     if atk is None:
         return 0.0
-
     value = 0.0
-
     # ------------------------
     # Future KO pressure
     # ------------------------
     if my_active is not None and opp_active is not None:
-
         hp = opp_active.get("hp") or 0
-
         dmg = gd.effective_damage(
             attacker_id=my_active.get("id"),
             attack_id=attack_id,
             base_dmg=atk.damage,
             defender_id=opp_active.get("id"),
         )
-
         if hp > 0:
-
             if dmg >= hp:
                 value += 90.0
-
             elif dmg * 2 >= hp:
                 value += 38.0
-
             elif dmg * 3 >= hp:
                 value += 14.0
-
     # ------------------------
     # Draw
     # ------------------------
     value += gd.attack_draw(attack_id) * 7.0
-
     # ------------------------
     # Healing
     # ------------------------
     value += gd.attack_heal(attack_id) * 0.45
-
     # ------------------------
     # Bench pressure
     # ------------------------
     bench = gd.attack_bench_damage(attack_id)
-
     value += bench * 0.30
-
     if gd.attack_spread(attack_id):
         value += 22.0
-
     # ------------------------
     # Gust
     # ------------------------
     if gd.attack_gust(attack_id):
         value += 55.0
-
     # ------------------------
     # Pivot attacks
     # ------------------------
     if gd.attack_switch(attack_id):
         value += 25.0
-
     # ------------------------
     # Energy acceleration
     # ------------------------
     if gd.attack_energy_acceleration(attack_id):
         value += 50.0
-
     # ------------------------
     # Energy denial
     # ------------------------
     if gd.attack_discards_opponent_energy(attack_id):
         value += 35.0
-
     if gd.attack_discards_self_energy(attack_id):
         value -= 15.0
-
     # ------------------------
     # Status
     # ------------------------
     value += gd.attack_status_score(attack_id)
-
     return value
 
 # ---------------------------------------------------------------------------
@@ -586,46 +563,30 @@ def _card_value(
 ) -> float:
     if cid is None:
         return 1.0
-
     if gd.is_basic_pokemon(cid):
         value = 100.0
-
         value += gd.best_damage(cid) * 0.12
-
         if gd.is_ex(cid):
             value += 35.0
-
         if gd.is_mega(cid):
             value += 30.0
-
         return value
-
     if gd.is_pokemon(cid):
         value = 75.0
-
         value += gd.best_damage(cid) * 0.14
-
         if gd.is_ex(cid):
             value += 40.0
-
         if gd.is_mega(cid):
             value += 40.0
-
         return value
-
     if gd.is_supporter(cid):
         return 42.0
-
     if gd.is_item(cid):
-
         if gd.is_dig_item(cid):
             return 38.0
-
         return 30.0
-
     if gd.is_energy(cid):
         return 16.0
-
     return 10.0
 
 # ---------------------------------------------------------------------------
@@ -653,11 +614,41 @@ def _choose_lowest(select: Select) -> list[int]:
     return list(range(k))
 
 def _fallback(select: Select) -> list[int]:
+    """Return a contract-safe fallback selection.
+    maxCount is always treated as the hard upper bound.
+    """
     n = len(select.options)
-    k = max(0, min(select.min_count, n))
-    if k == 0 and select.max_count >= 1 and select.select_type == SelectType.MAIN:
-        k = 1
-    return list(range(k))
+    min_count = max(
+        0,
+        min(
+            int(select.min_count),
+            n,
+        ),
+    )
+    max_count = max(
+        0,
+        min(
+            int(select.max_count),
+            n,
+        ),
+    )
+    # Normal contract.
+    if min_count <= max_count:
+        # MAIN decisions generally require one action when optional
+        # selection is otherwise allowed.
+        if (
+            min_count == 0
+            and max_count >= 1
+            and select.select_type == SelectType.MAIN
+        ):
+            return [0]
+        return list(
+            range(min_count)
+        )
+    # Impossible contract: never exceed maxCount.
+    return list(
+        range(max_count)
+    )
 
 # ---------------------------------------------------------------------------
 # State helpers
@@ -763,53 +754,35 @@ def _evaluate_board(
 ) -> float:
     """
     Evaluate a simulated board after one action.
-
     Larger is better.
     """
     score = 0.0
-
     # ---------- Active ----------
     active = me.get("active") or []
-
     if active:
         p = active[0]
-
         cid = p.get("id")
         energies = p.get("energies") or []
-
         best = gd.best_damage(cid)
-
         score += best * 0.55
-
         if not gd.needs_energy(cid, energies):
             score += 220.0
-
         score += len(energies) * 14.0
-
         if gd.is_ex(cid):
             score += 20.0
-
     # ---------- Bench ----------
     for p in me.get("bench") or []:
-
         cid = p.get("id")
         energies = p.get("energies") or []
-
         best = gd.best_damage(cid)
-
         score += best * 0.22
-
         if not gd.needs_energy(cid, energies):
             score += 90.0
-
         score += len(energies) * 5.0
-
         if gd.is_ex(cid):
             score += 8.0
-
     # Slight reward for wider board.
     score += len(me.get("bench") or []) * 12.0
-
     return score
 
 # ---------------------------------------------------------------------------
@@ -828,50 +801,35 @@ def _best_affordable_damage(
 ) -> int:
     """
     Highest effective damage currently available.
-
     Includes attack-effect bonus so tactical attacks compete fairly with
     raw-damage attacks.
     """
-
     if not isinstance(pkmn, dict):
         return 0
-
     cid = pkmn.get("id")
-
     if cid is None:
         return 0
-
     attached = pkmn.get("energies") or []
-
     defender_id = (
         defender.get("id")
         if isinstance(defender, dict)
         else None
     )
-
     best = 0
-
     for attack_id in gd.card_attacks.get(cid, ()):
-
         cost = gd.attack_cost(attack_id)
-
         if not gd.can_pay(cost, attached):
             continue
-
         dmg = gd.attack_damage(attack_id)
-
         if defender_id is not None:
             dmg = gd.effective_damage(
                 cid,
                 dmg,
                 defender_id,
             )
-
         dmg += gd.attack_effect_bonus(attack_id)
-
         if dmg > best:
             best = dmg
-
     return best
 
 def _in_danger(state, yi, gd: GameData) -> bool:
@@ -944,48 +902,34 @@ def _gust_value(
 ) -> float:
     """
     Score an opponent Pokémon for gust effects.
-
     Priorities:
-
         1. Immediate KO
         2. Prize value
         3. Damage output
         4. Lowest remaining HP
     """
-
     if not isinstance(target, dict):
         return 0.0
-
     hp = target.get("hp") or 0
     cid = target.get("id")
-
     my_dmg = _best_affordable_damage(
         my_active,
         gd,
         defender=target,
     )
-
     value = 0.0
-
     prize = gd.prize_value(cid)
-
     if hp > 0 and my_dmg >= hp:
         value += WEIGHTS["gust_ko"]
         value += prize * 80.0
-
     else:
         value += prize * 35.0
-
     value += gd.best_damage(cid) * 0.18
-
     value -= hp * 0.05
-
     if gd.is_mega(cid):
         value += WEIGHTS["gust_mega_ex"]
-
     elif gd.is_ex(cid):
         value += WEIGHTS["gust_ex"]
-
     return value
 
 def _hand(state, yi):
@@ -1050,34 +994,23 @@ def _powered_switch_value(
 ) -> float:
     """
     Score a Pokémon as a switch target.
-
     Priorities:
-
       1. Already able to attack
       2. High damage
       3. Healthy
       4. Already has energy
     """
-
     hp = pkmn.get("hp") or 0
     cid = pkmn.get("id")
     energies = pkmn.get("energies") or []
-
     damage = gd.best_damage(cid)
-
     value = damage * 0.30
-
     if _can_attack(pkmn, gd):
         value += 150.0
-
     value += len(energies) * 15.0
-
     value += min(hp, 220) * 0.08
-
     if gd.is_ex(cid):
         value += 15.0
-
     if hp <= 40:
         value -= 45.0
-
     return value

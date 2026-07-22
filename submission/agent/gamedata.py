@@ -82,11 +82,9 @@ class _Attack:
         self.status_confuse = False
         self.status_sleep = False
 
-
 class GameData:
     """Cached card-type and attack tables for runtime decision-making."""
     _instance: "GameData | None" = None
-
     def __init__(self) -> None:
         self.card_type: dict[int, int] = {}
         self.card_name: dict[int, str] = {}
@@ -336,27 +334,20 @@ class GameData:
     def attack_effect_bonus(self, attack_id: int | None) -> int:
         """
         Expected value from attack effects.
-
         Residual damage is already included here.
         """
         atk = self.attack(attack_id)
         if atk is None:
             return 0
-
         bonus = atk.effect_bonus
-
         if atk.gust:
             bonus += 20
-
         if atk.energy_acceleration:
             bonus += 25
-
         if atk.energy_discard_opponent:
             bonus += 18
-
         if atk.heal:
             bonus += min(20, atk.heal // 2)
-
         return bonus
 
     def attack_damage(self, attack_id: int | None) -> int:
@@ -427,63 +418,45 @@ class GameData:
     ) -> int:
         """
         Overall tactical value of an attack independent of raw damage.
-
         This is intentionally conservative. Damage is evaluated elsewhere;
         this only rewards secondary effects that often win games.
         """
         atk = self.attack(attack_id)
-
         if atk is None:
             return 0
-
         score = 0
-
         score += atk.draw * 5
         score += atk.heal // 10
         score += atk.bench_damage // 10
-
         if atk.gust:
             score += 35
-
         if atk.switch:
             score += 15
-
         if atk.energy_acceleration:
             score += 30
-
         if atk.energy_discard_opponent:
             score += 25
-
         if atk.energy_discard_self:
             score -= 15
-
         score += self.attack_status_score(attack_id)
-
         return score
 
     def best_damage(self, card_id: int | None) -> int:
         """
         Best realistic damage this Pokémon can produce.
-
         Includes attack-effect bonus so evaluation prefers attacks that
         deal less immediate damage but produce stronger board impact.
         """
         if card_id is None:
             return 0
-
         best = 0
-
         for aid in self.card_attacks.get(card_id, ()):
-
             atk = self.attack(aid)
             if atk is None:
                 continue
-
             dmg = atk.damage + self.attack_effect_bonus(aid)
-
             if dmg > best:
                 best = dmg
-
         return best
 
     # --- weakness / resistance reasoning ---------------------------------
@@ -501,41 +474,32 @@ class GameData:
     ) -> int:
         """
         True runtime damage estimate.
-
         Applies:
             • Weakness
             • Resistance
             • Mad Bite scaling
             • attack effect bonus
-
         Never crashes.
         """
         if base_dmg <= 0:
             return base_dmg
-
         dmg = base_dmg
-
         atk = self.attack(attack_id)
         if atk is not None:
             # Bloodmoon Ursaluna — Mad Bite
             if atk.attack_id == 175:
                 dmg = max(dmg, 100)
-
         atk_type = (
             self.card_energy_type.get(attacker_id)
             if attacker_id is not None
             else None
         )
-
         if atk_type is not None and defender_id is not None:
             if self.card_weakness.get(defender_id) == atk_type:
                 dmg *= WEAKNESS_MULT
-
             if self.card_resistance.get(defender_id) == atk_type:
                 dmg -= RESISTANCE_FLAT
-
         dmg += self.attack_effect_bonus(attack_id)
-
         return max(0, int(dmg))
     
     def is_dig_item(self, card_id: int | None) -> bool:
@@ -562,6 +526,7 @@ class GameData:
                 return False
         colorless = sum(1 for c in cost if c == EnergyType.COLORLESS)
         return len(pool) >= colorless
+    
     def needs_energy(self, card_id: int | None, attached: list[int]) -> bool:
         """True if ``card_id`` cannot yet pay its most expensive attack.
         A Pokémon that can already power its hardest attack does not benefit from

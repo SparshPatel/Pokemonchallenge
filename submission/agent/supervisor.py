@@ -28,7 +28,6 @@ _MAD_BITE_ID = 175
 class Supervisor:
     """
     Tournament-level supervisor.
-
     Responsibilities
     ----------------
     1. Force tactical wins.
@@ -168,88 +167,65 @@ def forced_retreat_survival(
     """
     If our Active is guaranteed to be KO'd next turn and we have a legal
     retreat into a healthier Pokémon, force the retreat.
-
     This only triggers when:
       • retreat is legal
       • opponent has lethal
       • bench contains a better survivor
     """
-
     try:
-
         if select.select_type != SelectType.MAIN:
             return None
-
         state = obs_dict.get("current")
         if not isinstance(state, dict):
             return None
-
         yi = state.get("yourIndex", 0)
-
         me = _player(state, yi)
         opp = _player(state, 1 - yi)
-
         active = _active(me)
         opp_active = _active(opp)
-
         if active is None or opp_active is None:
             return None
-
         active_hp = (
             active.get("hp", 0)
             - active.get("damage", 0)
         )
-
         incoming = 0
-
         for aid in gd.card_attacks.get(
             opp_active.get("id"),
             [],
         ):
-
             if not gd.can_pay(
                 gd.attack_cost(aid),
                 opp_active.get("energies") or [],
             ):
                 continue
-
             dmg = gd.effective_damage(
                 opp_active.get("id"),
                 gd.attack_damage(aid),
                 active.get("id"),
             )
-
             incoming = max(incoming, dmg)
-
         if incoming < active_hp:
             return None
-
         bench = me.get("bench") or []
-
         if not bench:
             return None
-
         healthiest = max(
             bench,
             key=lambda b:
                 b.get("hp", 0)
                 - b.get("damage", 0),
         )
-
         healthy_hp = (
             healthiest.get("hp", 0)
             - healthiest.get("damage", 0)
         )
-
         if healthy_hp <= active_hp:
             return None
-
         for option in select.options:
             if option.type == OptionType.RETREAT:
                 return [option.index]
-
         return None
-
     except Exception:
         return None
     
@@ -261,43 +237,31 @@ def forced_prize_trade(
     """
     If multiple attacks KO this turn, prefer the one that gives
     the best prize trade.
-
     Priority:
         1. More prizes taken
         2. Less self-risk
         3. Higher damage
     """
-
     try:
-
         if select.select_type != SelectType.MAIN:
             return None
-
         lethals = _lethal_options(
             obs_dict,
             select,
             gd,
         )
-
         if len(lethals) < 2:
             return None
-
         state = obs_dict.get("current")
         yi = state.get("yourIndex", 0)
-
         me = _player(state, yi)
         active = _active(me)
-
         my_prize_value = gd.prize_value(
             active.get("id"),
         )
-
         scored = []
-
         for idx, dmg, opp_prize in lethals:
-
             trade = opp_prize - my_prize_value
-
             scored.append(
                 (
                     trade,
@@ -306,11 +270,8 @@ def forced_prize_trade(
                     idx,
                 )
             )
-
         scored.sort(reverse=True)
-
         return [scored[0][3]]
-
     except Exception:
         return None
     
@@ -321,33 +282,25 @@ def forced_ability_order(
     """
     Always use free abilities before Items/Supporters/Attack
     when they are available.
-
     This prevents the planner from attacking or ending the turn
     while leaving free value on the table.
     """
-
     try:
-
         if select.select_type != SelectType.MAIN:
             return None
-
         abilities = []
-
         for option in select.options:
-
             if option.type != OptionType.ABILITY:
                 continue
-
             abilities.append(option.index)
-
         if not abilities:
             return None
-
-        return [abilities[0]]
-
+        if len(select.options) == len(abilities):
+            return [abilities[0]]
+        return None
     except Exception:
         return None
-
+    
 def forced_energy_conservation(
     obs_dict,
     select: Select,
@@ -356,7 +309,6 @@ def forced_energy_conservation(
     """
     Avoid discarding valuable Energy when another legal discard
     exists.
-
     Priority:
         Basic Energy
             >
@@ -364,47 +316,32 @@ def forced_energy_conservation(
             >
         Special Energy
     """
-
     try:
-
         if select.select_type != SelectType.CHOOSE_DISCARD:
             return None
-
         safe = []
-
         risky = []
-
         for option in select.options:
-
             card = getattr(
                 option,
                 "card",
                 None,
             )
-
             if not isinstance(card, dict):
                 continue
-
             cid = card.get("id")
-
             if cid is None:
                 continue
-
             if gd.is_basic_energy(cid):
                 safe.append(option.index)
                 continue
-
             if gd.is_special_energy(cid):
                 risky.append(option.index)
                 continue
-
             safe.append(option.index)
-
         if safe:
             return [safe[0]]
-
         return None
-
     except Exception:
         return None
     
@@ -417,86 +354,62 @@ def forced_bench_preservation(
     Avoid attaching or evolving onto a Pokémon that is almost
     certainly getting KO'd next turn if a safer target exists.
     """
-
     try:
-
         if select.select_type != SelectType.MAIN:
             return None
-
         state = obs_dict.get("current")
         if not isinstance(state, dict):
             return None
-
         yi = state.get("yourIndex", 0)
-
         me = _player(state, yi)
         opp = _player(state, 1 - yi)
-
         opp_active = _active(opp)
-
         if opp_active is None:
             return None
-
         threatened = []
-
         for mon in me.get("bench") or []:
-
             hp = (
                 mon.get("hp", 0)
                 - mon.get("damage", 0)
             )
-
             incoming = 0
-
             for aid in gd.card_attacks.get(
                 opp_active.get("id"),
                 [],
             ):
-
                 if not gd.can_pay(
                     gd.attack_cost(aid),
                     opp_active.get("energies") or [],
                 ):
                     continue
-
                 dmg = gd.effective_damage(
                     opp_active.get("id"),
                     gd.attack_damage(aid),
                     mon.get("id"),
                 )
-
                 incoming = max(incoming, dmg)
-
             if incoming >= hp:
                 threatened.append(mon.get("id"))
-
         if not threatened:
             return None
-
         for option in select.options:
-
             if option.type not in (
                 OptionType.ATTACH,
                 OptionType.EVOLVE,
             ):
                 continue
-
             target = getattr(
                 option,
                 "target",
                 None,
             )
-
             if (
                 isinstance(target, dict)
                 and target.get("id") in threatened
             ):
                 continue
-
             return [option.index]
-
         return None
-
     except Exception:
         return None
     
@@ -510,39 +423,26 @@ def forced_boss_finish(
     Prime Catcher / etc.) creates an immediate KO on a
     benched Pokémon, always force it.
     """
-
     try:
-
         if select.select_type != SelectType.MAIN:
             return None
-
         state = obs_dict.get("current")
         if not isinstance(state, dict):
             return None
-
         yi = state.get("yourIndex", 0)
-
         me = _player(state, yi)
         opp = _player(state, 1 - yi)
-
         my_active = _active(me)
-
         if my_active is None:
             return None
-
         attached = my_active.get("energies") or []
-
         best = None
-
         for option in select.options:
-
             if option.type != OptionType.PLAY:
                 continue
-
             text = str(
                 getattr(option, "text", "")
             ).lower()
-
             if not any(
                 k in text
                 for k in (
@@ -553,49 +453,38 @@ def forced_boss_finish(
                 )
             ):
                 continue
-
             for bench in opp.get("bench") or []:
-
                 hp = (
                     bench.get("hp", 0)
                     - bench.get("damage", 0)
                 )
-
                 best_damage = 0
-
                 for aid in gd.card_attacks.get(
                     my_active.get("id"),
                     [],
                 ):
-
                     if not gd.can_pay(
                         gd.attack_cost(aid),
                         attached,
                     ):
                         continue
-
                     dmg = gd.effective_damage(
                         my_active.get("id"),
                         gd.attack_damage(aid),
                         bench.get("id"),
                     )
-
                     best_damage = max(
                         best_damage,
                         dmg,
                     )
-
                 if best_damage >= hp:
-
                     prize = gd.prize_value(
                         bench.get("id"),
                     )
-
                     score = (
                         prize * 1000
                         + hp
                     )
-
                     if (
                         best is None
                         or score > best[0]
@@ -604,12 +493,9 @@ def forced_boss_finish(
                             score,
                             option.index,
                         )
-
         if best is None:
             return None
-
         return [best[1]]
-
     except Exception:
         return None
     
@@ -619,91 +505,57 @@ def strategic_override(
     gd: GameData,
     choice: list[int],
 ) -> list[int] | None:
-    """
-    Strategic supervisor layer.
-
-    Runs AFTER planner/rules have already selected an action.
-
-    Unlike forced_main(), these are NOT absolute game-rule certainties.
-    They are deterministic strategic corrections that may replace a weaker
-    planner choice.
-
-    Returns
-    -------
-    None
-        Keep planner/rules decision.
-
-    list[int]
-        Replace planner/rules decision.
-    """
-
     try:
-
-        survive = forced_retreat_survival(
-            obs_dict,
-            select,
-            gd,
-        )
-
-        if survive is not None:
-            return survive
-
-        trade = forced_prize_trade(
-            obs_dict,
-            select,
-            gd,
-        )
-
-        if trade is not None:
-            return trade
-
-        ability = forced_ability_order(
-            obs_dict,
-            select,
-        )
-
-        if ability is not None:
-            return ability
-
-        energy = forced_energy_conservation(
-            obs_dict,
-            select,
-            gd,
-        )
-
-        if energy is not None:
-            return energy
-
-        bench = forced_bench_preservation(
-            obs_dict,
-            select,
-            gd,
-        )
-
-        if bench is not None:
-            return bench
-
         boss = forced_boss_finish(
             obs_dict,
             select,
             gd,
         )
-
         if boss is not None:
             return boss
-
+        survive = forced_retreat_survival(
+            obs_dict,
+            select,
+            gd,
+        )
+        if survive is not None:
+            return survive
+        trade = forced_prize_trade(
+            obs_dict,
+            select,
+            gd,
+        )
+        if trade is not None:
+            return trade
+        bench = forced_bench_preservation(
+            obs_dict,
+            select,
+            gd,
+        )
+        if bench is not None:
+            return bench
+        ability = forced_ability_order(
+            obs_dict,
+            select,
+        )
+        if ability is not None:
+            return ability
+        energy = forced_energy_conservation(
+            obs_dict,
+            select,
+            gd,
+        )
+        if energy is not None:
+            return energy
         return None
-
     except Exception:
         return None
 
 def guard_main(obs_dict, select: Select, gd: GameData, choice: list[int]) -> list[int]:
     """
     Highest-priority tactical override.
-
     If an affordable attack immediately Knocks Out the opponent's Active,
     always take it.
-
     This overrides:
       • END TURN
       • RETREAT
@@ -714,35 +566,30 @@ def guard_main(obs_dict, select: Select, gd: GameData, choice: list[int]) -> lis
       • EVOLUTION
       • ENERGY
       • Ability-first sequencing
-
     There is almost never a stronger play than removing the opponent's
     Active immediately.
     """
     try:
-
         if select.select_type != SelectType.MAIN:
             return choice
-
         lethals = _lethal_options(
             obs_dict,
             select,
             gd,
         )
-
         if not lethals:
             return choice
-
         lethals.sort(
-            key=lambda x: (x[2], x[1]),
+            key=lambda x: (
+                x[2],
+                x[1],
+                x[0],
+            ),
             reverse=True,
         )
-
         best_attack = lethals[0][0]
-
         if choice and choice[0] == best_attack:
             return choice
-
         return [best_attack]
-
     except Exception:
         return choice

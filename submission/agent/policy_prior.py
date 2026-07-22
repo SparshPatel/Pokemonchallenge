@@ -32,13 +32,9 @@ TYPE_PRIORITY = {
 }
 
 class PolicyPrior:
-    def __init__(
-        self,
-        gamedata,
-        planner,
-    ):
-        self.gamedata = gamedata
+    def __init__(self, planner):
         self.planner = planner
+        self.gamedata = planner.gamedata
 
     # ---------------------------------------------------------
     def candidate_actions(
@@ -175,14 +171,6 @@ class PolicyPrior:
             )
         except Exception:
             rules_pick = None
-        state = node.get("current")
-        me = node.get("yourIndex", 0)
-        players = state.get("players") if isinstance(state, dict) else None
-        my_active = None
-        opp_active = None
-        if isinstance(players, list) and len(players) >= 2:
-            my_active = self.planner._active(players[me])
-            opp_active = self.planner._active(players[1 - me])
         scores = {}
         for option in select.options:
             score = self.score(
@@ -190,38 +178,14 @@ class PolicyPrior:
                 rules_pick,
                 search_id,
             )
-            if (
-                option.type == OptionType.ATTACK
-                and my_active is not None
-                and opp_active is not None
-            ):
-                dmg = self.planner._best_affordable_dmg(
-                    my_active,
-                    opp_active,
-                    self.gamedata,
-                )
-                score += dmg * 0.02
-                opp_hp = (
-                    opp_active.get("hp", 0)
-                    - opp_active.get("damage", 0)
-                )
-                if dmg >= opp_hp:
-                    score += 8.0
-            elif option.type == OptionType.RETREAT:
-                if my_active is not None:
-                    retreat = my_active.get(
-                        "retreatCost",
-                        0,
-                    )
-                    attached = len(
-                        my_active.get("energies") or []
-                    )
-                    if attached >= retreat:
-                        score += 2.0
-            elif option.type == OptionType.EVOLVE:
+            if option.type == OptionType.EVOLVE:
                 score += 2.5
             elif option.type == OptionType.ATTACH:
                 score += 2.0
+            elif option.type == OptionType.RETREAT:
+                score += 2.0
+            elif option.type == OptionType.ATTACK:
+                score += 3.0
             scores[option.index] = max(
                 score,
                 0.001,

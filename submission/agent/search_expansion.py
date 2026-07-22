@@ -43,11 +43,15 @@ class SearchExpansion:
                 search_id,
             )
             candidate_select = self.planner.Select(
-                select_type=select.select_type,
                 options=candidate_options,
                 min_count=select.min_count,
                 max_count=select.max_count,
-                player=select.player,
+                select_type=select.select_type,
+                context=select.context,
+                remain_energy_cost=select.remain_energy_cost,
+                remain_damage_counter=select.remain_damage_counter,
+                deck=select.deck,
+                raw=select.raw,
             )
         else:
             candidate_select = select
@@ -56,6 +60,34 @@ class SearchExpansion:
             candidate_select,
             search_id,
         )
+        if (
+            self.planner.opponent_embedding is not None
+            and priors
+        ):
+            emb = self.planner.opponent_embedding
+            attack_bias = 1.0 + emb[0] * 0.15
+            setup_bias = 1.0 + emb[1] * 0.10
+            for option in candidate_select.options:
+                if option.index not in priors:
+                    continue
+                try:
+                    t = option.type.name
+                except Exception:
+                    t = str(option.type)
+                if t == "ATTACK":
+                    priors[option.index] *= attack_bias
+                elif t in (
+                    "PLAY",
+                    "ATTACH",
+                    "EVOLVE",
+                    "ABILITY",
+                ):
+                    priors[option.index] *= setup_bias
+            total = sum(priors.values())
+            if total > 0:
+                inv = 1.0 / total
+                for action in priors:
+                    priors[action] *= inv
         if (
             search_id
             == getattr(

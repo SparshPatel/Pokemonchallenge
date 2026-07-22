@@ -80,7 +80,9 @@ class Determinizer:
             and attempts > 0
         ):
             attempts -= 1
-            opp_pool = self.build_opponent_pool()
+            opp_pool = self.build_opponent_pool(
+                opp_player,
+            )
             det = self._sample_once(
                 my_pool,
                 opp_pool,
@@ -104,15 +106,23 @@ class Determinizer:
         return determinizations
 
     # ---------------------------------------------------------
-    def build_my_pool(
+    def build_opponent_pool(
         self,
         player,
     ):
-        unseen = Counter(self.your_deck_ids)
+        """
+        Build the unseen opponent card pool.
+        Removes every opponent card that is already publicly visible
+        (active, bench, discard, attached cards, revealed hand, etc.)
+        before sampling hidden cards.
+        """
+        unseen = Counter(self.opponent_deck_ids)
         for cid in visible_ids(player):
             if unseen.get(cid, 0):
                 unseen[cid] -= 1
-        return list(unseen.elements())
+        pool = list(unseen.elements())
+        self.rng.shuffle(pool)
+        return pool
 
     # ---------------------------------------------------------
     def build_opponent_pool(self):

@@ -155,10 +155,55 @@ class SearchRollout:
             depth <= 0
             or self.tree.ctx.nodes >= self.planner.max_nodes
         ):
-            return self.planner._eval(
+            score = self.planner._eval(
                 state,
                 me,
             )
+            if (
+                self.planner.adaptive is not None
+                and self.planner.opponent_embedding is not None
+            ):
+                try:
+                    strategy = type(
+                        "Strategy",
+                        (),
+                        {
+                            "comeback_mode": False,
+                        },
+                    )()
+                    prediction = type(
+                        "Prediction",
+                        (),
+                        {
+                            "board_risk": 0.0,
+                            "active_survival_probability": 1.0,
+                            "knockout_probability": 0.0,
+                        },
+                    )()
+                    adaptive = self.planner.adaptive.analyse(
+                        state,
+                        strategy,
+                        prediction,
+                    )
+                    emb = self.planner.opponent_embedding
+                    score += (
+                        adaptive.aggression_shift
+                        * emb[0]
+                        * 25.0
+                    )
+                    score += (
+                        adaptive.setup_shift
+                        * emb[1]
+                        * 20.0
+                    )
+                    score += (
+                        adaptive.resource_shift
+                        * emb[2]
+                        * 15.0
+                    )
+                except Exception:
+                    pass
+            return score
         return None
 
     # ---------------------------------------------------------

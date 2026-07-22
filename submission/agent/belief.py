@@ -215,17 +215,15 @@ class BeliefState:
                 seen[cid] -= 1
             else:
                 hidden.append(cid)
-        # Better than pure shuffle:
-        # Pokémon are more likely to already be in play or hand,
-        # trainers slightly favoured in hand,
-        # energies slightly favoured remaining in deck.
-        rng.shuffle(hidden)
-        hidden.sort(
-            key=lambda c: (
-                rng.random(),
-                c % 7,
-            )
-        )
+        def priority(card_id: int):
+            pokemon = cand.counts.get(card_id, 0) > 0
+            score = rng.random()
+            if pokemon:
+                score -= 0.25
+            else:
+                score += 0.10
+            return score
+        hidden.sort(key=priority)
         hand = hidden[:hand_count]
         hidden = hidden[hand_count:]
         prize = hidden[:prize_count]
